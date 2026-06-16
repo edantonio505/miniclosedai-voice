@@ -1,0 +1,52 @@
+# MiniClosedAI voice service — pinned dependency manifest.
+#
+# Every direct dep is pinned to a known-working version so pip's resolver
+# converges in one pass instead of backtracking through gradio variants
+# (a 60+ MB redownload per attempt). Bump versions deliberately, not casually.
+#
+# Torch + torchaudio are NOT listed here — the Dockerfile pre-installs them
+# from pytorch.org's cu128 index in a separate layer so this resolution
+# layer can be cached when only the app deps change.
+
+# ── Web layer
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+httpx==0.28.1
+
+# ── Audio I/O
+numpy<2
+soundfile==0.13.1
+# av<13 because aiortc still pins to it; faster-whisper used to require av>=11
+# but transformers Whisper works with anything PyAV-compatible.
+av>=11,<13
+
+# ── ASR: HuggingFace Whisper on GPU
+# chatterbox-tts==0.1.1 hard-pins transformers==4.46.3, so we match it
+# here to satisfy both packages with one resolution pass.
+transformers==4.46.3
+accelerate==1.14.0
+# gradio 5.17.0 needs >=0.28.1; transformers / accelerate happily accept 0.28+.
+huggingface-hub==0.28.1
+# transformers 4.46.x ships with tokenizers 0.20.x.
+tokenizers==0.20.3
+
+# ── TTS: Chatterbox (the actual goal — replaces Piper).
+# Models auto-download (~3 GB) into ~/.cache/huggingface on first use.
+chatterbox-tts==0.1.1
+
+# ── Denoise: DeepFilterNet — ONNX runtime backend, no pyrnnoise/audiolab
+# dependency hell. ~50 MB model, runs in ~5ms per 10ms chunk on GPU.
+deepfilternet==0.5.6
+
+# ── WebRTC: FastRTC owns the silero VAD + aiortc plumbing for /call mode.
+fastrtc==0.0.34
+# Gradio is pulled in transitively by fastrtc. Pin it to the EXACT version
+# fastrtc 0.0.34 was tested against — otherwise pip backtracks through ~10
+# gradio releases at 62 MB each.
+gradio==5.17.0
+# gradio 5.17.0 hard-pins gradio-client==1.7.1
+gradio-client==1.7.1
+
+# ── Misc
+requests==2.32.3
