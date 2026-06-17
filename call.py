@@ -260,19 +260,37 @@ class BotCallHandler:
         t_first_sentence: float | None = None
         t_first_tts_chunk: float | None = None
         n_sentences = 0
-        # The producer runs the LLM SSE reader + per-sentence TTS as a SEPARATE
-        # task, and pushes events into an asyncio.Queue. This generator just
-        # drains the queue and yields. Without this split the SSE socket isn't
-        # read while await self._synthesize is running (~500-700 ms), so LLM
-        # tokens pile up in the network buffer and then flush as a burst —
-        # exactly the "text appears in stutters while audio plays smoothly"
-        # symptom. Now text events forward as fast as the LLM emits them.
+        # Two concurrent tasks, one output queue:
+        #
+        #   _llm_reader  ──reads SSE non-stop──►  text events to out_q
+        #                                         sentence_q for the TTS worker
+        #   _tts_worker  ──pops sentence──►  await synthesize  ──►  audio to out_q
+        #
+        # An earlier single-task version awaited synthesize inside the LLM
+        # read loop. While that await ran (~500-700 ms per sentence), the
+        # `async for raw in resp.aiter_text()` was suspended — incoming LLM
+        # tokens piled up in MiniClosedAI's SSE buffer and then drained as
+        # a burst when synthesize returned, producing the visible "text
+        # stutters while audio plays smoothly" symptom. The two-task split
+        # keeps the SSE socket continuously read regardless of TTS state,
+        # so text events forward at the LLM's actual emission cadence.
         out_q: asyncio.Queue = asyncio.Queue()
+        sentence_q: asyncio.Queue = asyncio.Queue()
         SENTINEL = object()
+        # Counter so the tts_worker can attach a stable index per sentence to
+        # its first-chunk timing log. Producer increments; consumer reads.
 
-        async def _producer():
+        async def _llm_reader():
+            """Read the LLM /chat/stream SSE socket continuously.
+
+            Pushes text events directly to out_q (so the UI bubble sees them
+            without TTS latency in the way) and queues complete sentences
+            for the tts_worker. Never awaits synthesize itself — this is the
+            critical property: as long as MiniClosedAI is sending tokens,
+            this task is reading them.
+            """
             nonlocal buffer, full_reply, n_sentences
-            nonlocal t_llm_first_tok, t_first_sentence, t_first_tts_chunk
+            nonlocal t_llm_first_tok, t_first_sentence
             try:
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(300.0, connect=10.0), verify=False,
@@ -280,9 +298,10 @@ class BotCallHandler:
                     async with client.stream(
                         "POST", url,
                         # persist=False is the call-mode latency win — the
-                        # persist=True path in MiniClosedAI launches a background
-                        # task whose SSE buffer adds ~1.7s to TTFT. A call is
-                        # ephemeral; we don't need refresh-resilient behavior.
+                        # persist=True path in MiniClosedAI launches a
+                        # background task whose SSE buffer adds ~1.7s to TTFT.
+                        # Call mode persists asynchronously via the
+                        # /voice/persist-call-turn endpoint at end-of-turn.
                         json={"message": text, "persist": False, "include_history": True, "voice_mode": True},
                         headers={"Accept": "text/event-stream"},
                     ) as resp:
@@ -320,13 +339,12 @@ class BotCallHandler:
                                             "conv=%s [llm] first token in %.0f ms",
                                             self.conv_id, timings["llm_ttft_ms"],
                                         )
-                                    # Forward the text IMMEDIATELY — the bubble
-                                    # in the UI streams without waiting on TTS.
+                                    # Forward the text IMMEDIATELY — every
+                                    # token reaches the UI bubble at the LLM's
+                                    # actual emission cadence, untouched by TTS.
                                     await out_q.put(("text", piece))
-                                    # Pump every complete sentence to TTS; the
-                                    # synth blocks this producer for ~700 ms each
-                                    # but the consumer keeps draining text events
-                                    # the producer already queued.
+                                    # Pump complete sentences onto sentence_q;
+                                    # the tts_worker pops them in parallel.
                                     while True:
                                         sentence, buffer = _next_sentence(buffer)
                                         if not sentence:
@@ -340,46 +358,61 @@ class BotCallHandler:
                                                 self.conv_id, n_sentences,
                                                 timings["first_sentence_ms"], sentence[:80],
                                             )
-                                        await out_q.put(("speaking", None))
-                                        t_tts = time.perf_counter()
-                                        try:
-                                            chunks = await self._synthesize(sentence)
-                                            if t_first_tts_chunk is None and chunks:
-                                                t_first_tts_chunk = time.perf_counter()
-                                                timings["tts_first_chunk_ms"] = (t_first_tts_chunk - t_tts) * 1000
-                                                log.info(
-                                                    "conv=%s [tts #%d] first chunk in %.0f ms",
-                                                    self.conv_id, n_sentences,
-                                                    timings["tts_first_chunk_ms"],
-                                                )
-                                            for pcm_chunk, out_sr in chunks:
-                                                await out_q.put(("audio", (out_sr, pcm_chunk)))
-                                        except Exception as e:
-                                            log.exception("tts (mid-stream) failed: %r", e)
-                                            await out_q.put(("err", f"tts: {e}"))
+                                        await sentence_q.put((n_sentences, sentence))
                                 if ev.get("end"):
                                     chat_done = True
                                     break
                             if chat_done:
                                 break
-                # Trailing flush — the last sentence often has no terminator +
-                # lookahead, so it stays in the buffer until the LLM stops.
+                # Flush whatever's still in the buffer (final fragment, often
+                # has no terminator).
                 tail = buffer.strip()
                 if tail:
-                    await out_q.put(("speaking", None))
-                    try:
-                        for pcm_chunk, out_sr in await self._synthesize(tail):
-                            await out_q.put(("audio", (out_sr, pcm_chunk)))
-                    except Exception as e:
-                        log.exception("tts (tail) failed: %r", e)
-                        await out_q.put(("err", f"tts: {e}"))
+                    n_sentences += 1
+                    await sentence_q.put((n_sentences, tail))
             except Exception as e:
                 log.exception("chat stream failed")
                 await out_q.put(("err", f"chat: {e}"))
             finally:
+                # Signal end-of-sentences to the tts worker.
+                await sentence_q.put((None, None))
+
+        async def _tts_worker():
+            """Pop sentences off sentence_q, synthesize, push audio to out_q.
+
+            Runs strictly in parallel to _llm_reader — synthesis time here
+            doesn't gate the LLM SSE read at all.
+            """
+            nonlocal t_first_tts_chunk
+            try:
+                while True:
+                    idx, sentence = await sentence_q.get()
+                    if idx is None:
+                        break  # _llm_reader signalled end-of-sentences
+                    await out_q.put(("speaking", None))
+                    t_tts = time.perf_counter()
+                    try:
+                        chunks = await self._synthesize(sentence)
+                        if t_first_tts_chunk is None and chunks:
+                            t_first_tts_chunk = time.perf_counter()
+                            timings["tts_first_chunk_ms"] = (t_first_tts_chunk - t_tts) * 1000
+                            log.info(
+                                "conv=%s [tts #%d] first chunk in %.0f ms",
+                                self.conv_id, idx,
+                                timings["tts_first_chunk_ms"],
+                            )
+                        for pcm_chunk, out_sr in chunks:
+                            await out_q.put(("audio", (out_sr, pcm_chunk)))
+                    except Exception as e:
+                        log.exception("tts (sentence #%d) failed: %r", idx, e)
+                        await out_q.put(("err", f"tts: {e}"))
+            finally:
+                # Whether we exited normally or via an exception, signal the
+                # consumer that no more events are coming.
                 await out_q.put((SENTINEL, None))
 
-        producer_task = asyncio.create_task(_producer())
+        llm_task = asyncio.create_task(_llm_reader())
+        tts_task = asyncio.create_task(_tts_worker())
         spoke_announced = False
         try:
             while True:
@@ -399,8 +432,10 @@ class BotCallHandler:
                 elif kind == "err":
                     yield AdditionalOutputs({"error": payload})
         finally:
-            if not producer_task.done():
-                producer_task.cancel()
+            # Cancel both tasks if they're still running (e.g. caller hung up).
+            for t in (llm_task, tts_task):
+                if not t.done():
+                    t.cancel()
 
         # 4. Done — tell the UI to finalize the bubble and reset to listening.
         timings["total_ms"] = (time.perf_counter() - t_turn_start) * 1000
@@ -417,6 +452,36 @@ class BotCallHandler:
             timings.get("total_ms", 0),
             reply_text[:100] + ("…" if len(reply_text) > 100 else ""),
         )
+
+        # 5. Fire-and-forget: write the turn into MiniClosedAI's conversation
+        #    history. Decoupled from the LLM call (which uses persist=False
+        #    for the latency win) so persistence costs zero TTFT but the
+        #    conversation still records every turn — same shape as a normal
+        #    /chat/stream turn would produce.
+        if text and reply_text:
+            async def _persist():
+                try:
+                    persist_url = (
+                        f"{self.miniclosedai_url}/api/conversations/"
+                        f"{self.conv_id}/voice/persist-call-turn"
+                    )
+                    async with httpx.AsyncClient(
+                        timeout=httpx.Timeout(30.0, connect=5.0), verify=False,
+                    ) as client:
+                        r = await client.post(
+                            persist_url,
+                            json={"user": text, "assistant": reply_text},
+                        )
+                        if r.status_code >= 400:
+                            log.warning(
+                                "conv=%s persist-call-turn HTTP %d: %s",
+                                self.conv_id, r.status_code,
+                                r.text[:200].replace("\n", " "),
+                            )
+                except Exception as e:
+                    log.warning("conv=%s persist-call-turn failed: %r", self.conv_id, e)
+            asyncio.create_task(_persist())
+
         yield AdditionalOutputs({"status": "listening"})
         yield AdditionalOutputs({"end": True})
 
