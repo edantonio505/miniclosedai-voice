@@ -1,142 +1,89 @@
-# miniclosedai-voice — open-source ASR + TTS in one container
+# MiniClosedAI Voice Service
 
-Self-hosted speech for MiniClosedAI bots. A single FastAPI service in a Docker
-image, exposing five endpoints that the main MiniClosedAI app wires up as a
-backend (Settings → Add endpoint → **Voice (ASR + TTS)** → paste this URL).
+Open-source voice microservice for MiniClosedAI. Browser ↔ FastRTC ↔ HuggingFace
+Whisper (ASR) ↔ Chatterbox TTS (high-quality voice synthesis) ↔ DeepFilterNet
+(noise suppression). Talks to MiniClosedAI as a `kind='voice'` backend; the URL
+is registered in MiniClosedAI's Settings → Add endpoint.
 
-The same image runs identically on your laptop (`docker run`) and on a RunPod
-GPU pod. There's no compose-level coupling with MiniClosedAI — the two
-containers find each other only through the URL you paste.
-
-## What's inside
-
-| Layer | Library | License | Notes |
-|---|---|---|---|
-| ASR | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | MIT | CTranslate2 Whisper. Multilingual. Auto-picks fp16 on GPU, int8 on CPU. |
-| TTS | [Piper](https://github.com/rhasspy/piper) | MIT | ONNX runtime, ships **4 English + 4 Spanish** voices in v1. |
-| HTTP | FastAPI + uvicorn | MIT | Single worker — GPU is serialized anyway. |
-
-Voices in v1:
-
-- English: Amy (US, F), Ryan (US, M), Alan (GB, M), Jenny (GB, F)
-- Spanish: Dave (Spain, M), Sharvard (Spain, F), Claude (Mexico, F), Ald (Mexico, M)
-
-More can be added by appending to `VOICE_CATALOG` in `tts.py` — Piper's
-[voice gallery](https://rhasspy.github.io/piper-samples/) has 40+ EN and 10+ ES voices.
-
-## Quick start
-
-The fastest way — `./start.sh` handles everything (build, ufw rule, container, health poll, prints the URL to paste into MiniClosedAI):
+## Quick start (any machine with NVIDIA GPU + CUDA driver)
 
 ```bash
+git clone <this-repo>.git miniclosedai-voice
 cd miniclosedai-voice
-./start.sh             # build (if needed) + start + wait for /health
-./start.sh logs        # tail the logs
-./start.sh status      # ports, container state, LAN URL
-./start.sh down        # stop
-./start.sh restart     # bounce
-./start.sh health      # one-shot /health probe
+./setup.sh                  # detects CUDA, creates env/, installs everything
+./start.sh                  # foreground server on :8090
+# (or)
+./start.sh -d               # daemonize, log to /tmp/voice.log
+./stop.sh                   # stop the daemon
 ```
 
-If you'd rather drive Docker directly:
+That's it. **No Docker, no nvidia-container-toolkit, no images to push.**
+The setup script auto-detects your CUDA version and pulls matching torch
+wheels from `pytorch.org/whl/cu{118,124,128,130}` so the same repo works on:
 
-```bash
-# Build
-docker build -t miniclosedai-voice:latest .
+* GB10 / Grace Blackwell / DGX Spark (CUDA 13)
+* RTX 50 / Hopper desktops (CUDA 12.8)
+* RTX 30 / 40 / A100 / L4 (CUDA 12.4)
+* Jetson Orin (CUDA 12.x)
+* CPU-only fallback (`./setup.sh --cpu`)
 
-# Run (CPU; works on any laptop)
-docker run --rm -p 8090:8090 \
-    -v voice_models:/root/.cache/huggingface \
-    -v voice_pipers:/voices \
-    miniclosedai-voice:latest
+## RunPod / cloud-GPU template
 
-# Run (GPU; RunPod or any NVIDIA host)
-docker run --rm --gpus all -p 8090:8090 \
-    -e VOICE_ASR_MODEL=large-v3 -e VOICE_DEVICE=cuda \
-    -v voice_models:/root/.cache/huggingface \
-    -v voice_pipers:/voices \
-    miniclosedai-voice:latest
+1. Pick any PyTorch / Ubuntu template with NVIDIA driver installed (most
+   RunPod templates qualify).
+2. Open a web terminal on the pod.
+3. `git clone <this-repo>.git && cd miniclosedai-voice && ./setup.sh && ./start.sh -d`
+4. Expose port 8090. Paste the public URL into MiniClosedAI's Settings.
 
-# Or via compose (uses docker-compose.yml in this folder)
-docker compose up -d --build
-```
-
-The two volumes (`voice_models` for the whisper cache, `voice_pipers` for the
-Piper .onnx voices) make cold starts after the first ~instant. First start
-downloads ~250 MB of voices and a whisper model.
+First run downloads ~3 GB of torch + CUDA libs + the Whisper-medium.en model
+and ~3 GB of Chatterbox weights. After that, restarts are instant.
 
 ## API
 
-```text
-GET  /health           — {ok, asr_model, tts_model, device, voices_loaded}
-GET  /voices           — {"en": [{id,name,gender}, ...], "es": [...]}
-POST /transcribe       — multipart audio (+optional language)  →  {text, language, segments}
-POST /speak            — JSON {text, voice, language, speed?}  →  audio/wav
-POST /speak/stream     — JSON {text, voice, language, speed?}  →  SSE chunk_b64 × N + done:true
+The service speaks the same endpoints MiniClosedAI's voice client expects:
+
+```
+GET  /health
+GET  /voices
+POST /transcribe       multipart audio → {text, language, segments}
+POST /speak            JSON → audio/wav (one-shot)
+POST /speak/stream     JSON → SSE chunked PCM
+POST /call/configure   set per-call config (conv_id, miniclosedai_url, voice, lang)
+POST /webrtc/offer     SDP offer → answer (mounted by FastRTC)
+GET  /call/events/{id} SSE: transcript / chunk / end / error events
 ```
 
-OpenAPI lives at `http://localhost:8090/docs` once the container is up.
+## Configuration
 
-### Quick sanity checks
+Environment variables (all optional):
+
+| Var | Default | Description |
+|---|---|---|
+| `VOICE_PORT` | `8090` | TCP port |
+| `VOICE_DEVICE` | `auto` | `auto` / `cuda` / `cpu` |
+| `VOICE_ASR_MODEL` | `medium.en` | `tiny.en` / `small.en` / `medium.en` / `large-v3` |
+| `VOICE_VOICES_DIR` | `./voices` | Where reference voice WAVs live |
+| `VOICE_API_KEY` | _(unset)_ | Optional Bearer token for inbound auth |
+| `VOICE_LOG` | `/tmp/voice.log` | Daemon log file when using `start.sh -d` |
+| `VOICE_PIDFILE` | `/tmp/voice.pid` | Daemon pidfile |
+
+## Testing
+
+`test_client.py` ships in the repo — an aiortc-driven smoke test that
+synthesizes a test phrase, drives the full call pipeline, and reports a
+per-stage timing breakdown (audio→transcript / transcript→first LLM token /
+first token→first audio).
 
 ```bash
-# /health (instant)
-curl localhost:8090/health
-
-# /voices catalog
-curl localhost:8090/voices | python3 -m json.tool
-
-# Transcribe a WAV
-curl -F audio=@hello.wav localhost:8090/transcribe
-
-# Speak English
-curl -X POST localhost:8090/speak \
-    -H 'Content-Type: application/json' \
-    -d '{"text":"Hello from MiniClosedAI.","voice":"en_US-amy-medium","language":"en"}' \
-    -o hello-en.wav
-
-# Speak Spanish
-curl -X POST localhost:8090/speak \
-    -H 'Content-Type: application/json' \
-    -d '{"text":"Hola desde MiniClosedAI.","voice":"es_MX-claude-high","language":"es"}' \
-    -o hello-es.wav
+source env/bin/activate
+python test_client.py --url https://<miniclosedai-host>:8095 \
+                      --conv-id 94 --phrase "Hello, can you hear me?"
 ```
 
-## Configuration (env vars)
+## Requirements
 
-| Var | Default | Notes |
-|---|---|---|
-| `VOICE_ASR_MODEL` | `small` | `tiny` / `base` / `small` / `medium` / `large-v3`. CPU is happy up to `small`; GPU can run `large-v3`. |
-| `VOICE_DEVICE` | `auto` | `auto` / `cuda` / `cpu`. `auto` picks CUDA when `torch.cuda.is_available()`. |
-| `VOICE_VOICES_DIR` | `/voices` | Where Piper `.onnx` files cache. Mount a volume for persistence. |
-| `VOICE_PORT` | `8090` | The port uvicorn binds. |
-| `VOICE_API_KEY` | *(unset)* | If set, every request must carry `Authorization: Bearer <key>`. Leave unset for trusted LAN. |
+* Python 3.11+ (3.12 preferred — matches the proven-working baseline)
+* NVIDIA driver with CUDA 11.8 / 12.4 / 12.8 / 13.x (or CPU)
+* ~6 GB free disk for the venv + models
 
-## Plugging into MiniClosedAI
-
-Once the container is up at `http://localhost:8090` (local) or
-`https://<pod-id>-8090.proxy.runpod.net` (RunPod):
-
-1. Open MiniClosedAI → **Settings → LLM Endpoints → + Add endpoint**.
-2. Pick **Voice (ASR + TTS)**.
-3. Paste the URL. Add the `VOICE_API_KEY` as the API key field if you set one.
-4. Click **Test**. You'll see the voices catalog populate.
-5. Open any bot → sidebar **Parameters** → pick a voice + language.
-6. Hold the 🎤 button on the chat composer to talk to the bot.
-
-(The push-to-talk UI ships in MiniClosedAI; this service only does ASR + TTS.)
-
-## Roadmap
-
-- Better-sounding TTS: swap Piper for XTTS-v2 or F5-TTS behind the same
-  `/speak/stream` contract once a clean MIT-licensed option matures.
-- Voice cloning: upload a 10-second reference WAV → cloned voice.
-- Streaming ASR (partial transcripts during a long utterance).
-- Per-language LoRA adapters on whisper for domain tuning (your other repo
-  already has a recipe — port the `lora_adapters/` layout straight in).
-
-## License
-
-MIT (matches the rest of MiniClosedAI). The bundled voices keep their original
-Piper licenses (also permissive; see the
-[Piper voice list](https://huggingface.co/rhasspy/piper-voices)).
+No Docker, no root, no system packages required.

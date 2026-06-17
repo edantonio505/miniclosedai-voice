@@ -40,21 +40,36 @@ from av import AudioFrame
 # clean signal at normal speech levels. Same path /speak uses, but we call
 # the in-process TTS directly to avoid an extra HTTP hop.
 # ---------------------------------------------------------------------------
-async def synth_test_phrase(text: str, voice: str = "en_US-amy-medium", language: str = "en") -> str:
-    """Write Piper-rendered `text` to /tmp/test_phrase.wav, return the path."""
-    sys.path.insert(0, "/app")
-    from tts import TTS  # local import — only needs the in-container module
-    tts = TTS(voices_dir="/voices", use_cuda=False)
-    pcm = b""
-    sample_rate = None
-    for chunk, sr in tts.synthesize_stream(text, voice, language, None):
-        pcm += chunk
-        sample_rate = sr
-    if not pcm or sample_rate is None:
-        raise RuntimeError("TTS produced no audio")
+async def synth_test_phrase(text: str, voice: str = "default", language: str = "en",
+                            speak_url: str = "http://localhost:8090/speak") -> str:
+    """Generate `text` as a WAV via the local server's /speak endpoint.
+
+    Reuses the server's GPU-loaded TTS instead of spinning up a second copy
+    (Chatterbox on CPU takes minutes per sentence — unusable for tests).
+    Falls back to a synthesized sine-burst at 16 kHz if /speak is unavailable,
+    which still exercises the full WebRTC + VAD path even if TTS is offline.
+    """
     path = "/tmp/test_phrase.wav"
-    audio = np.frombuffer(pcm, dtype=np.int16)
-    # Pad with ~2s of silence at the end. Without it the WAV ends abruptly,
+    audio = None
+    sample_rate = 22050
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as c:
+            resp = await c.post(speak_url, json={
+                "text": text, "voice": voice, "language": language,
+            })
+            resp.raise_for_status()
+            data = resp.content
+            with wave.open(io.BytesIO(data)) as r:
+                sample_rate = r.getframerate()
+                audio = np.frombuffer(r.readframes(r.getnframes()), dtype=np.int16)
+    except Exception:
+        # Fallback — synthesize a 1-second 440Hz beep so the rest of the test
+        # can still exercise WebRTC handshake + VAD. Won't transcribe but
+        # surfaces stage timings for everything except ASR.
+        t = np.linspace(0, 1.0, sample_rate, endpoint=False, dtype=np.float32)
+        audio = (np.sin(2 * np.pi * 440 * t) * 16000).astype(np.int16)
+
+    # Pad with ~2s of trailing silence. Without it the WAV ends abruptly,
     # aiortc raises MediaStreamError instead of emitting silence frames, and
     # silero never sees the post-speech silence that triggers end-of-turn —
     # the handler never fires and the test reads as a false negative.

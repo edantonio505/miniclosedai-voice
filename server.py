@@ -78,7 +78,12 @@ async def _get_tts() -> TTS:
     if _tts is None:
         async with _load_lock:
             if _tts is None:
-                _tts = TTS(voices_dir=TTS_VOICES_DIR, use_cuda=(DEVICE == "cuda"))
+                # `auto` and `cuda` both enable GPU; TTS falls back to CPU
+                # internally if torch.cuda.is_available() is False. The earlier
+                # `== "cuda"` check forced auto to CPU and made TTS 20× slower
+                # (1.2s → 22s on GB10 — Chatterbox Turbo's diffusion benefits
+                # massively from CUDA fp16).
+                _tts = TTS(voices_dir=TTS_VOICES_DIR, use_cuda=(DEVICE != "cpu"))
     return _tts
 
 
@@ -123,7 +128,7 @@ def health():
     return {
         "ok": True,
         "asr_model": ASR_MODEL,
-        "tts_model": "piper",
+        "tts_model": "chatterbox-turbo",
         "device": DEVICE,
         "voices_loaded": _tts is not None,
     }
@@ -328,10 +333,13 @@ def _ensure_stream():
         except Exception:
             return pcm
 
-    # The browser's mic delivers low-amplitude audio (peak ~5% of int16 full
-    # scale on the user's chain). Apply a modest fixed gain so VAD + Whisper
-    # see normal speech levels. 4× brings peak~1500 → ~6000 without clipping.
-    _GAIN = 4
+    # IMPORTANT: previously 4× to rescue a very-quiet mic chain. The current
+    # mic chain delivers peak~32768 (already at int16 ceiling), so 4× CLIPS
+    # every sample and produces sustained noise that silero misreads as
+    # continuous speech — the handler waits seconds before declaring pause.
+    # Keep gain at 1 (passthrough). If you ever hit a quiet-mic setup again,
+    # bump to 2 or 4 — but check logs for `peak=32767` clipping first.
+    _GAIN = 1
 
     def _amplify(pcm):
         if pcm is None or not hasattr(pcm, "astype"):
@@ -362,10 +370,17 @@ def _ensure_stream():
     _stream = Stream(
         handler=ReplyOnPause(
             _amplified_call_handler,
+            # can_interrupt=False kills barge-in. We disable it because on a
+            # laptop with speakers + open mic, the bot's TTS audio bleeds
+            # back into the mic, silero scores it as "speech", and the active
+            # reply gets cancelled mid-sentence — the "bot starts talking then
+            # stops" symptom. Re-enable when the chain has proper AEC
+            # (echo cancellation) on the browser-side getUserMedia constraints.
+            can_interrupt=False,
             # Silero defaults to 2000ms of silence before declaring end-of-turn,
-            # which is most of the perceived "took a really long time" lag. With
-            # amplified audio (above), 300ms is reliable for conversational
-            # turn-taking. min_speech_duration_ms=100 catches short "yes"/"no".
+            # which is most of the perceived "took a really long time" lag.
+            # 300ms is reliable for conversational turn-taking with a clean
+            # mic chain. min_speech_duration_ms=100 catches short "yes"/"no".
             model_options=SileroVadOptions(
                 min_silence_duration_ms=300,
                 min_speech_duration_ms=100,
@@ -402,13 +417,26 @@ async def _mount_call_stream():
 @app.on_event("startup")
 async def _prewarm_models():
     # Whisper-small is ~500MB; loading it on the first VAD pause makes turn 1
-    # of a call mode session feel sluggish vs every subsequent turn. Pull both
-    # ASR and TTS into memory at startup so the first utterance is fast.
-    # Fire-and-forget — startup completes immediately; /health stays cheap.
+    # of a call sluggish vs every subsequent turn. Pull both ASR and TTS into
+    # memory AND run one real inference each so PyTorch's PTX-JIT kernels
+    # compile and cache before the user's first utterance hits the pipeline.
+    # Without the inference pass, the first transcribe still pays the JIT
+    # tax (~2-3 s on sm_121 GB10).
     async def _warm():
         try:
-            await _get_asr()
-            await _get_tts()
+            asr = await _get_asr()
+            tts = await _get_tts()
+            # Force a real Whisper forward pass on 1 s of zero-PCM. Fast on
+            # GPU once kernels are cached, slow first time — which is exactly
+            # what we want to take out of the call-mode critical path.
+            import numpy as _np
+            await asyncio.to_thread(
+                asr.transcribe_array, _np.zeros(16000, dtype=_np.int16), 16000, "en",
+            )
+            # And one TTS forward pass so Chatterbox's t3 + s3gen JIT-cache
+            # the kernels we use during synthesize_stream.
+            for _ in tts.synthesize_stream("Hello.", "default", "en", None):
+                break
         except Exception:
             import traceback
             traceback.print_exc()

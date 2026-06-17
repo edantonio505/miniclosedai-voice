@@ -2,14 +2,13 @@
 #
 # MiniClosedAI voice service — single-stage, multi-arch CUDA build.
 #
-# This Dockerfile produces the same image on amd64 and arm64:
-#
-#   * ASR: HuggingFace Whisper via transformers + PyTorch with CUDA.
-#     Both architectures install the GPU torch wheel straight from
-#     pytorch.org's cu124 index (no source compile, ~3 min builds).
-#   * TTS: Piper. PyPI's `onnxruntime-gpu` wheel is available on amd64 only,
-#     so x86_64 deploys get Piper on GPU; aarch64 falls back to CPU ONNX
-#     gracefully (TTS first-chunk on CPU Piper is still ~100ms).
+# Mirrors the proven-working setup in BCP_stuff/env on this exact GB10:
+#   * Base:    nvidia/cuda:13.3.0-cudnn-runtime (matches torch's cu130 wheels)
+#   * Torch:   2.10.0+cu130 from pytorch.org's cu130 index (aarch64+amd64)
+#   * ASR:     HuggingFace Whisper-medium.en (transformers pipeline on GPU)
+#   * TTS:     Chatterbox 0.1.6 — installed with --no-deps to bypass its
+#              torch==2.6.0 hard pin (the working install uses torch 2.10+).
+#   * Denoise: DeepFilterNet (df.enhance) via ONNX runtime.
 #
 # Build:
 #   docker build -t miniclosedai-voice:latest .
@@ -24,9 +23,7 @@
 #     -v voice_pipers:/voices \
 #     miniclosedai-voice:latest
 
-# CUDA 12.8 base — matches PyTorch's cu128 wheels and supports Blackwell sm_120/sm_121
-# (NVIDIA GB10 etc.). cu124 + torch 2.5 errored with "no kernel image available".
-FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:13.3.0-cudnn-runtime-ubuntu22.04
 ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -44,31 +41,45 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# PyTorch with CUDA 12.8 support — covers all current NVIDIA architectures
-# including Blackwell consumer (sm_120) and GB10 (sm_121). Pulled from
-# pytorch.org's cu128 index (has both linux/amd64 and linux/arm64 wheels
-# since 2.7+). Pinning to >=2.7 to ensure Blackwell is supported.
-RUN pip install --no-cache-dir 'torch>=2.7' 'torchaudio>=2.7' \
-    --index-url https://download.pytorch.org/whl/cu128
+# PyTorch 2.10.0+cu130 (matches BCP_stuff/env). cu130 is the only PyTorch
+# build channel with native Blackwell sm_120/sm_121 support; older channels
+# (cu124, cu128) either error or fall back to PTX JIT.
+RUN pip install --no-cache-dir \
+        torch==2.10.0 torchaudio==2.10.0 \
+        --index-url https://download.pytorch.org/whl/cu130
+
+# Chatterbox-tts 0.1.6 hard-pins torch==2.6.0 and transformers==4.46.3 in its
+# metadata, but the proven-working install at BCP_stuff/env runs it against
+# torch 2.10.0+cu130 + transformers 4.49.0 with no runtime issues. Install
+# chatterbox with --no-deps so pip doesn't downgrade torch back to CPU 2.6.0;
+# the explicit deps in requirements.txt below satisfy what chatterbox needs.
+RUN pip install --no-cache-dir --no-deps chatterbox-tts==0.1.6
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# onnxruntime-gpu has aarch64+CUDA wheels only on NVIDIA's Jetson index; the
-# PyPI one is amd64-only. Try it; if the install fails, Piper falls back to
-# its CPU ONNX provider (still ~100ms first chunk, fine for sentence streaming).
+# Patch deepfilternet 0.5.6 to work with torchaudio >= 2.10. Its io.py imports
+# `torchaudio.backend.common.AudioMetaData`, a path that was removed in 2.10
+# (the symbol moved to torchaudio.AudioMetaData). Upstream hasn't released a
+# fix; this in-place edit keeps the install otherwise unchanged.
+RUN sed -i 's|from torchaudio.backend.common import AudioMetaData|from torchaudio import AudioMetaData|' \
+        /usr/local/lib/python3.11/dist-packages/df/io.py
+
+# onnxruntime-gpu only ships amd64+CUDA wheels on PyPI. arm64 falls back to
+# the CPU ONNX provider, which is fine for Piper (legacy) and DeepFilterNet's
+# small enhancement model — both run in single-digit ms either way.
 RUN if [ "${TARGETARCH}" = "amd64" ]; then \
         pip install --no-cache-dir onnxruntime-gpu==1.20.1; \
     else \
-        echo "[info] arm64 build — Piper TTS will use CPU ONNX provider"; \
+        echo "[info] arm64 build — DeepFilterNet uses CPU ONNX provider"; \
     fi
 
 COPY asr.py tts.py call.py server.py test_client.py ./
 
 RUN mkdir -p /voices /root/.cache/huggingface
 
-# Default to medium.en — the same model chatterbox uses and the sweet spot
-# on a consumer GPU. Set VOICE_ASR_MODEL=tiny.en / small.en / large-v3 to
+# Default to medium.en — same model chatterbox_fastrtc.py uses, sweet spot on
+# a consumer NVIDIA. Set VOICE_ASR_MODEL=tiny.en / small.en / large-v3 to
 # trade off speed vs accuracy; VOICE_DEVICE=cpu to disable CUDA.
 ENV VOICE_PORT=8090 \
     VOICE_VOICES_DIR=/voices \

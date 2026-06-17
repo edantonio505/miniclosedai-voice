@@ -1,12 +1,13 @@
 # MiniClosedAI voice service — pinned dependency manifest.
 #
-# Every direct dep is pinned to a known-working version so pip's resolver
-# converges in one pass instead of backtracking through gradio variants
-# (a 60+ MB redownload per attempt). Bump versions deliberately, not casually.
+# Versions mirror the proven-working install at /home/edgar/Desktop/BCP_stuff/env
+# (Chatterbox running on the same GB10 GPU). Chatterbox-tts itself is installed
+# in the Dockerfile with --no-deps; this file pins the sub-deps it actually
+# USES at runtime (which differ from its hard-pinned metadata).
 #
-# Torch + torchaudio are NOT listed here — the Dockerfile pre-installs them
-# from pytorch.org's cu128 index in a separate layer so this resolution
-# layer can be cached when only the app deps change.
+# Torch / torchaudio are NOT listed here — the Dockerfile pre-installs them
+# from pytorch.org's cu130 index in a separate layer so this resolution layer
+# can be Docker-cached independently of app dep changes.
 
 # ── Web layer
 fastapi==0.115.6
@@ -15,38 +16,50 @@ python-multipart==0.0.20
 httpx==0.28.1
 
 # ── Audio I/O
-numpy<2
+# deepfilternet 0.5.6 hard-pins numpy<2.0. Chatterbox is happy with either
+# (BCP_stuff/env uses 2.x but works on 1.26 too), so we satisfy DF here.
+numpy>=1.24,<2
 soundfile==0.13.1
-# av<13 because aiortc still pins to it; faster-whisper used to require av>=11
-# but transformers Whisper works with anything PyAV-compatible.
+# av<13 because aiortc still pins to it.
 av>=11,<13
 
-# ── ASR: HuggingFace Whisper on GPU
-# chatterbox-tts==0.1.1 hard-pins transformers==4.46.3, so we match it
-# here to satisfy both packages with one resolution pass.
-transformers==4.46.3
-accelerate==1.14.0
-# gradio 5.17.0 needs >=0.28.1; transformers / accelerate happily accept 0.28+.
-huggingface-hub==0.28.1
-# transformers 4.46.x ships with tokenizers 0.20.x.
-tokenizers==0.20.3
+# ── ASR: HuggingFace Whisper on GPU (transformers pipeline).
+# Versions match BCP_stuff/env's working set.
+transformers==4.49.0
+accelerate==1.12.0
+huggingface-hub==0.36.2
+tokenizers==0.21.0
+safetensors==0.4.5
 
-# ── TTS: Chatterbox (the actual goal — replaces Piper).
-# Models auto-download (~3 GB) into ~/.cache/huggingface on first use.
-chatterbox-tts==0.1.1
+# ── Chatterbox TTS sub-deps (chatterbox-tts==0.1.6 is installed in the
+# Dockerfile with --no-deps to skip its torch==2.6 hard pin; these are the
+# runtime deps it actually needs).
+librosa==0.11.0
+s3tokenizer==0.3.0
+conformer==0.3.2
+resemble-perth==1.0.1
+diffusers==0.37.0
+omegaconf>=2.3,<3
+pyloudnorm>=0.1
+# Chinese / Japanese support packages — chatterbox imports them at startup
+# even for English-only synth, so they must be present.
+spacy-pkuseg>=0.0.32
+pykakasi==2.3.0
 
-# ── Denoise: DeepFilterNet — ONNX runtime backend, no pyrnnoise/audiolab
-# dependency hell. ~50 MB model, runs in ~5ms per 10ms chunk on GPU.
+# ── Denoise: DeepFilterNet — ONNX-backed neural denoiser, ~50 MB model.
+# Replaces the broken pyrnnoise/audiolab attempt.
 deepfilternet==0.5.6
 
 # ── WebRTC: FastRTC owns the silero VAD + aiortc plumbing for /call mode.
-fastrtc==0.0.34
-# Gradio is pulled in transitively by fastrtc. Pin it to the EXACT version
-# fastrtc 0.0.34 was tested against — otherwise pip backtracks through ~10
-# gradio releases at 62 MB each.
+# [vad] extra pulls silero-vad + onnxruntime so ReplyOnPause works at runtime.
+fastrtc[vad]==0.0.34
+# Gradio pulled in transitively by fastrtc — pin to the pair that resolves
+# in one pass instead of backtracking through 60 MB wheels.
 gradio==5.17.0
-# gradio 5.17.0 hard-pins gradio-client==1.7.1
 gradio-client==1.7.1
 
 # ── Misc
 requests==2.32.3
+# resemble-perth (chatterbox's watermarker) uses pkg_resources which was
+# removed from setuptools 81+. Pin to the last version that still ships it.
+setuptools<81

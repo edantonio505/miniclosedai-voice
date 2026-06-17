@@ -1,0 +1,27 @@
+# Python venv created by setup.sh
+env/
+.venv/
+
+# Bytecode + caches
+__pycache__/
+*.py[cod]
+*.so
+
+# Voice reference WAVs are user-supplied; bundling default.wav is optional
+# (it's only ~400 KB but skip if you'd rather treat it as runtime config).
+# voices/
+
+# Model caches (downloaded on first run, multi-GB)
+.cache/
+*.onnx
+*.bin
+*.safetensors
+
+# Logs + tmp
+*.log
+/tmp/
+
+# Editor / OS junk
+.DS_Store
+.vscode/
+.idea/
