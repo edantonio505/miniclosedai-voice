@@ -447,20 +447,61 @@ async def _prewarm_models():
 async def speak_stream(req: SpeakRequest, _=Depends(_require_auth)):
     """SSE chunked synth — each frame is `{chunk_b64, sample_rate}` (int16 PCM
     base64-encoded), then a terminal `{done: true}`. MiniClosedAI's push-to-talk
-    UI decodes the chunks straight into Web Audio for seamless playback."""
+    UI decodes the chunks straight into Web Audio for seamless playback.
+
+    The Chatterbox Turbo `synthesize_stream` generator yields one chunk every
+    ~75 speech tokens (~250-500 ms of GPU work per chunk). It's a SYNC generator,
+    so iterating it inside this async handler would block the event loop for
+    each chunk — and the SSE bytes for previously-yielded chunks would sit in
+    FastAPI's buffer until the loop got idle time, producing the "I see the
+    full paragraph then hear all the audio at once" symptom.
+    We drive the sync generator from a worker thread and bridge each chunk
+    back to the async caller via a thread-safe queue, so the SSE socket
+    flushes every chunk the moment it's ready.
+    """
     tts = await _get_tts()
 
     async def gen():
+        chunk_q: asyncio.Queue = asyncio.Queue()
+        SENTINEL = object()
+        loop = asyncio.get_running_loop()
+
+        def _run():
+            try:
+                for chunk, sr in tts.synthesize_stream(
+                    req.text, req.voice, req.language, req.speed,
+                ):
+                    asyncio.run_coroutine_threadsafe(
+                        chunk_q.put((chunk, sr)), loop,
+                    )
+            except Exception as e:
+                asyncio.run_coroutine_threadsafe(
+                    chunk_q.put(("__error__", str(e))), loop,
+                )
+            finally:
+                asyncio.run_coroutine_threadsafe(
+                    chunk_q.put(SENTINEL), loop,
+                )
+
+        worker = asyncio.create_task(asyncio.to_thread(_run))
         try:
-            for chunk, sr in tts.synthesize_stream(req.text, req.voice, req.language, req.speed):
+            while True:
+                item = await chunk_q.get()
+                if item is SENTINEL:
+                    break
+                if isinstance(item, tuple) and item[0] == "__error__":
+                    yield f"data: {json.dumps({'error': item[1]})}\n\n"
+                    return
+                chunk, sr = item
                 event = {
                     "chunk_b64": base64.b64encode(chunk).decode("ascii"),
                     "sample_rate": sr,
                 }
                 yield f"data: {json.dumps(event)}\n\n"
             yield f"data: {json.dumps({'done': True})}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        finally:
+            # If the client disconnected mid-stream, let the worker drain.
+            await worker
 
     return StreamingResponse(
         gen(),
