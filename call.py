@@ -178,26 +178,62 @@ class BotCallHandler:
         self.language = language
 
     async def _synthesize(self, text: str):
-        """Synthesize one sentence in a worker thread; return all PCM chunks.
+        """Yield (pcm_chunk_bytes, sample_rate) per TTS chunk as they form.
 
-        Strips markdown / emojis / list bullets first — these read as
-        "asterisk", "hash", etc. when handed to the TTS verbatim. Collecting
-        per-sentence keeps the main async loop responsive; chunks then yield
-        back into the FastRTC media track in order. Sentences are short
-        enough (<240 chars) that the thread call returns in 150-400 ms.
+        Earlier this collected all chunks then returned a list — meaning the
+        first audio frame couldn't leave the server until the WHOLE sentence
+        had finished synthesizing (1-3 s on the GB10 PTX-JIT). Now it streams:
+        Chatterbox Turbo yields one chunk every ~75 speech tokens (~250 ms),
+        we push each chunk as soon as it appears, and the WebRTC track gets
+        the first audible frame after just the first chunk completes.
+
+        Strips markdown / emojis / list bullets first — these would read as
+        "asterisk", "hash", etc. when handed to the TTS verbatim.
         """
         text = clean_for_tts(text)
         if not text:
-            return []
+            return
+
+        # Drive the synchronous Chatterbox generator from a worker thread,
+        # bridging chunks back to the async caller via a thread-safe queue.
+        # This is the standard pattern for sync generators in asyncio: a
+        # SENTINEL marks the end of the stream.
+        chunk_q: asyncio.Queue = asyncio.Queue()
+        SENTINEL = object()
+        loop = asyncio.get_running_loop()
+
         def _run():
-            out: list[tuple[bytes, int]] = []
-            for pcm_chunk, sr in self.tts.synthesize_stream(
-                text, self.voice_id, self.language,
-            ):
-                if pcm_chunk:
-                    out.append((pcm_chunk, sr))
-            return out
-        return await asyncio.to_thread(_run)
+            try:
+                for pcm_chunk, sr in self.tts.synthesize_stream(
+                    text, self.voice_id, self.language,
+                ):
+                    if pcm_chunk:
+                        # asyncio.Queue isn't thread-safe; route the put back
+                        # through the loop so it lands on the right context.
+                        asyncio.run_coroutine_threadsafe(
+                            chunk_q.put((pcm_chunk, sr)), loop,
+                        )
+            except Exception as e:
+                asyncio.run_coroutine_threadsafe(
+                    chunk_q.put(("__error__", e)), loop,
+                )
+            finally:
+                asyncio.run_coroutine_threadsafe(
+                    chunk_q.put(SENTINEL), loop,
+                )
+
+        worker = asyncio.create_task(asyncio.to_thread(_run))
+        try:
+            while True:
+                item = await chunk_q.get()
+                if item is SENTINEL:
+                    break
+                if isinstance(item, tuple) and item[0] == "__error__":
+                    raise item[1]
+                yield item
+        finally:
+            # If the consumer broke early, make sure the worker can finish.
+            await worker
 
     async def respond(self, audio):
         """Run one turn: ASR → chat (streamed) → sentence-by-sentence TTS.
@@ -381,7 +417,11 @@ class BotCallHandler:
             """Pop sentences off sentence_q, synthesize, push audio to out_q.
 
             Runs strictly in parallel to _llm_reader — synthesis time here
-            doesn't gate the LLM SSE read at all.
+            doesn't gate the LLM SSE read at all. Each chunk is forwarded to
+            out_q the moment Chatterbox emits it (no collect-then-yield), so
+            the WebRTC track plays the first audio frame as soon as the first
+            ~250 ms of speech has been synthesized rather than waiting for
+            the whole sentence (1-3 s).
             """
             nonlocal t_first_tts_chunk
             try:
@@ -391,17 +431,19 @@ class BotCallHandler:
                         break  # _llm_reader signalled end-of-sentences
                     await out_q.put(("speaking", None))
                     t_tts = time.perf_counter()
+                    sentence_first_chunk_logged = False
                     try:
-                        chunks = await self._synthesize(sentence)
-                        if t_first_tts_chunk is None and chunks:
-                            t_first_tts_chunk = time.perf_counter()
-                            timings["tts_first_chunk_ms"] = (t_first_tts_chunk - t_tts) * 1000
-                            log.info(
-                                "conv=%s [tts #%d] first chunk in %.0f ms",
-                                self.conv_id, idx,
-                                timings["tts_first_chunk_ms"],
-                            )
-                        for pcm_chunk, out_sr in chunks:
+                        async for pcm_chunk, out_sr in self._synthesize(sentence):
+                            if not sentence_first_chunk_logged:
+                                sentence_first_chunk_logged = True
+                                if t_first_tts_chunk is None:
+                                    t_first_tts_chunk = time.perf_counter()
+                                    timings["tts_first_chunk_ms"] = (t_first_tts_chunk - t_tts) * 1000
+                                log.info(
+                                    "conv=%s [tts #%d] first chunk in %.0f ms",
+                                    self.conv_id, idx,
+                                    (time.perf_counter() - t_tts) * 1000,
+                                )
                             await out_q.put(("audio", (out_sr, pcm_chunk)))
                     except Exception as e:
                         log.exception("tts (sentence #%d) failed: %r", idx, e)
