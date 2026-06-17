@@ -221,8 +221,41 @@ conditioning.
 
 ## End-to-end test
 
-`test_client.py` drives the full call pipeline programmatically (aiortc
-client, no browser needed):
+### `./test.sh` — full smoke suite (run before every commit)
+
+```bash
+./start.sh -d                # service must be running
+./test.sh                    # ~10 s, 15 assertions, color-coded pass/fail
+```
+
+Covers, in order:
+
+1. **Imports + GPU** — torch CUDA, transformers, chatterbox, df, fastrtc, aiortc
+2. **`/health`** — service reachable, model labels correct
+3. **`/voices`** — catalog non-empty + well-formed
+4. **`/speak`** — returns a valid WAV with non-trivial audio
+5. **`/speak/stream`** — first chunk latency, chunks arrive over SSE
+6. **ASR round-trip** — TTS output sent back through `/transcribe`,
+   fuzzy-matched against the input phrase
+7. **Call mode handshake** — `/call/configure` + `/webrtc/offer` accepts an
+   aiortc-generated SDP and returns a valid answer
+
+Flags:
+
+```
+./test.sh --skip-call       # skip the WebRTC stage (~3 s faster)
+./test.sh --skip-roundtrip  # skip ASR round-trip
+./test.sh --strict          # non-zero exit on warnings too (CI mode)
+./test.sh --verbose         # full tracebacks on failure
+```
+
+Exit code is `0` on all-pass, `1` on any failure, `2` on warnings under
+`--strict`. **Run this every time you add a feature** so a regression in
+imports, audio I/O, or the call handshake catches you immediately.
+
+### `test_client.py` — drives a real bot through call mode
+
+A heavier test that goes all the way through the live LLM and back:
 
 ```bash
 source env/bin/activate
