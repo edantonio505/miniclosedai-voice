@@ -207,15 +207,64 @@ quiet and silero may never fire at all.
 
 ---
 
-## Voice cloning
+## Voice Studio — clone voices from your browser
 
-Drop a 5–10 s clean speech WAV into `voices/` named `<id>.wav`. It's then
-available at synthesis time by passing `voice=<id>` (the call backend reads
-the chosen voice from `conversations.voice_settings.voice_id`).
+Open the service's root URL in any modern browser:
 
-The shipped `voices/default.wav` is the built-in fallback. To replace it,
-overwrite that file; restart the service so Chatterbox re-loads its
-conditioning.
+```
+http://<voice-host>:8090/
+```
+
+You get a small **Voice Studio** page that lets you:
+
+1. **Record** up to 30 seconds of yourself (or anyone) speaking — *or* click
+   **Upload audio file** to pick an existing clip (WAV, MP3, M4A, OGG, FLAC).
+   Either way, aim for 5–15 s of clean, natural speech — that's what
+   Chatterbox's docs recommend.
+2. **Name** the voice (e.g. *"Edgar's voice"*) and pick a language
+   (English / Spanish).
+3. **Save** — the server normalises the audio to 22050 Hz mono 16-bit PCM
+   and writes both `voices/<slug>.wav` and a sidecar `voices/<slug>.json`
+   carrying the display name + language.
+
+Uploaded files are decoded entirely in the browser (via the Web Audio API)
+and re-encoded as WAV before they leave your machine, so the server stays
+WAV-only and doesn't need ffmpeg or any extra codecs in the image.
+
+The voice is **immediately** available — no restart needed. `GET /voices`
+rescans the directory on every request, so the next time
+[MiniClosedAI](https://github.com/edantonio505/miniclosedai)'s TTS picker
+calls `/api/voices` (which proxies through to this service) your clone
+shows up in the dropdown.
+
+The Studio also lists every existing voice with a **▶ Sample** button
+(synthesizes a short greeting so you can audition it) and a **Delete**
+button for clones. The built-in `default` voice can't be deleted — it's
+the fallback that keeps the service usable when nothing else is registered.
+
+### Endpoints powering the Studio
+
+The page is a thin client over three HTTP endpoints; you can drive them
+directly from `curl` or your own UI:
+
+| Method | Path                     | Body / params                                            | Returns |
+|--------|--------------------------|----------------------------------------------------------|---------|
+| GET    | `/voices`                | (none)                                                   | live catalog `{lang: [{id, name, gender?}, ...]}` |
+| POST   | `/voices`                | multipart: `audio` (WAV, 0.5–35 s), `name`, `language`   | `201 {voice_id, name, language, duration_sec, sample_rate}` |
+| DELETE | `/voices/{voice_id}`     | (none)                                                   | `{ok, voice_id}` (or `400` for `default`, `404` for unknown) |
+
+### Advanced — manual WAV drop
+
+If you'd rather skip the GUI: drop a `<id>.wav` directly into `voices/` and
+it appears the same way (Chatterbox accepts most WAV formats; the GUI just
+normalises for consistency). Optionally pair it with a `<id>.json` carrying
+`{"name": "...", "language": "en"}` so the dropdown shows a friendly name.
+Without the sidecar, the filename gets title-cased (`my-voice.wav` →
+*"My voice"*) and the voice defaults to English.
+
+The shipped `voices/default.wav` is the built-in fallback. Overwrite it to
+change what users hear when no other voice is selected; restart the service
+so Chatterbox re-runs its `prepare_conditionals` on the new reference.
 
 ---
 

@@ -45,9 +45,27 @@ services:
       VOICE_DEVICE: ${VOICE_DEVICE:-cuda}
       VOICE_API_KEY: ${VOICE_API_KEY:-}
       VOICE_PORT: 8090
+      # Hugging Face auth for ChatterboxTurboTTS.from_pretrained(). The
+      # chatterbox repo is gated, so the model snapshot download fails with
+      # `LocalTokenNotFoundError` without a token. Pass via `HF_TOKEN` (the
+      # standard hf_hub name) or set on the host shell — both work because
+      # huggingface_hub checks every env-var alias. The default tries to
+      # read your host login at ~/.cache/huggingface/token via the wrapper
+      # in `start.sh`; override on the command line if you want a different
+      # account: `HF_TOKEN=hf_xxx docker compose up -d voice`.
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
     volumes:
-      - voice_models:/root/.cache/huggingface   # whisper model cache
-      - voice_pipers:/voices                    # Piper voice .onnx files
+      - voice_models:/root/.cache/huggingface   # whisper / chatterbox model cache
+      # Bind-mount the host's `voices/` directory directly (NOT a Docker
+      # named volume). Three benefits:
+      #   1. The shipped `default.wav` reference clip is visible to the
+      #      container without a separate `docker cp` step.
+      #   2. Uploads + records from the Voice Studio GUI land here on the
+      #      host, surviving image rebuilds.
+      #   3. The user can manage / back up voice clones with normal file
+      #      tools — no `docker volume export` required.
+      - ./voices:/voices
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
       interval: 30s

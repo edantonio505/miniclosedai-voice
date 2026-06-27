@@ -75,6 +75,9 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
     fi
 
 COPY asr.py tts.py call.py server.py test_client.py ./
+# Voice Studio GUI — static HTML/JS/CSS served at the service root (`/`).
+# Mounted by server.py via FastAPI's StaticFiles when this directory exists.
+COPY static/ ./static/
 
 RUN mkdir -p /voices /root/.cache/huggingface
 

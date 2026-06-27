@@ -214,6 +214,75 @@ def stage_voices(s: Suite, url: str) -> None:
     s.run("/voices returns a non-empty catalog", get_voices)
 
 
+def stage_studio(s: Suite, url: str) -> None:
+    """Voice Studio GUI + clone endpoints — exercises POST/DELETE /voices."""
+    _h("Voice Studio (clone endpoints + static GUI)")
+
+    def get_root():
+        with _client(url) as c:
+            r = c.get("/")
+            assert r.status_code == 200, f"got {r.status_code}"
+            assert "Voice Studio" in r.text, "GUI HTML not served"
+    s.run("GET / serves the Voice Studio page", get_root)
+
+    def reject_default_delete():
+        with _client(url) as c:
+            r = c.delete("/voices/default")
+            assert r.status_code == 400, f"expected 400, got {r.status_code}"
+    s.run("DELETE /voices/default is refused (reserved)", reject_default_delete)
+
+    # Round-trip: upload a tiny synthetic WAV → list shows it → DELETE removes it.
+    def upload_and_delete():
+        # 1 s of 440 Hz sine at 22050 Hz mono — minimal valid WAV, easily
+        # passes the 0.5 s minimum-duration check on the server.
+        import math
+        import struct
+        import wave
+        import io as _io
+        sr = 22050
+        n = sr  # 1 second
+        amp = 0.25
+        buf = _io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            samples = bytearray()
+            for i in range(n):
+                v = int(32767 * amp * math.sin(2 * math.pi * 440 * i / sr))
+                samples += struct.pack("<h", v)
+            w.writeframes(bytes(samples))
+        wav_bytes = buf.getvalue()
+
+        clone_name = "E2E Clone Test"
+        with _client(url) as c:
+            r = c.post(
+                "/voices",
+                files={"audio": ("clone.wav", wav_bytes, "audio/wav")},
+                data={"name": clone_name, "language": "en"},
+            )
+            assert r.status_code == 201, f"upload failed: {r.status_code} {r.text}"
+            payload = r.json()
+            voice_id = payload["voice_id"]
+            assert payload["name"] == clone_name
+            assert payload["language"] == "en"
+            assert payload["sample_rate"] == 22050
+            assert 0.9 < payload["duration_sec"] < 1.2, payload
+
+            # Catalog should now include the new voice under 'en'.
+            cat = c.get("/voices").json()
+            ids = [v["id"] for entries in cat.values() for v in entries]
+            assert voice_id in ids, f"new voice missing: {ids}"
+
+            # Delete + verify removal.
+            dr = c.delete(f"/voices/{voice_id}")
+            assert dr.status_code == 200, f"delete failed: {dr.status_code} {dr.text}"
+            cat = c.get("/voices").json()
+            ids = [v["id"] for entries in cat.values() for v in entries]
+            assert voice_id not in ids, f"voice still in catalog after delete: {ids}"
+    s.run("POST + DELETE /voices round-trip succeeds", upload_and_delete)
+
+
 def stage_tts(s: Suite, url: str) -> bytes:
     _h("TTS via /speak (one-shot)")
     wav_bytes = b""
@@ -384,6 +453,7 @@ def main() -> int:
         return s.summary()
 
     stage_voices(s, args.url)
+    stage_studio(s, args.url)
     wav = stage_tts(s, args.url)
     stage_tts_stream(s, args.url)
     if not args.skip_roundtrip:

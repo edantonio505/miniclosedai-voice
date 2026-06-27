@@ -33,6 +33,7 @@ clean speech sample). Drop additional WAVs there to add voices.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Iterator
 
@@ -41,8 +42,12 @@ import torch
 import torch.nn.functional as F
 
 
-# Static catalog — the `/voices` payload. Each `id` MUST match a `<id>.wav`
-# under VOICE_VOICES_DIR. `default` is the fallback when no match.
+# Static fallback catalog — used only when the voices/ directory is missing
+# or empty. The real `/voices` response is built by `scan_voice_catalog()`,
+# which walks the directory and pairs each `<id>.wav` with an optional
+# sidecar `<id>.json` carrying display metadata (`{name, language, gender}`).
+# Adding a voice via the Voice Studio GUI writes both files; the catalog
+# rebuilds on the next request — no service restart needed.
 VOICE_CATALOG: dict[str, list[dict]] = {
     "en": [
         {"id": "default",  "name": "Default voice",  "gender": "F"},
@@ -51,6 +56,93 @@ VOICE_CATALOG: dict[str, list[dict]] = {
         {"id": "default",  "name": "Default voice",  "gender": "F"},
     ],
 }
+
+
+# Acceptable voice-file extensions, in priority order. Mirrors `_wav_for()`
+# below so the catalog scanner and the synth-time resolver agree on what
+# counts as a usable voice file.
+_VOICE_EXTS = ("wav", "WAV", "flac")
+
+
+def _voice_display_name(voice_id: str) -> str:
+    """Fall back name when no sidecar JSON exists. `edgar-voice` → `Edgar voice`."""
+    cleaned = voice_id.replace("_", " ").replace("-", " ").strip()
+    return cleaned[:1].upper() + cleaned[1:] if cleaned else voice_id
+
+
+def scan_voice_catalog(voices_dir: Path) -> dict[str, list[dict]]:
+    """Build the `/voices` payload by walking `voices_dir`.
+
+    For each `<id>.wav` (or `.WAV` / `.flac`) it looks for a sibling
+    `<id>.json` with `{name, language, gender?}` and bucketises by language.
+    Missing sidecar → falls back to a title-cased filename + `en` language.
+    `default.wav` always appears under `en` and `es` so existing callers
+    that hard-coded those two languages don't suddenly lose their fallback.
+
+    Returns the same shape as `VOICE_CATALOG` ({language: [{id, name, ...}]}),
+    safe to JSON-serialise verbatim. Cheap enough to run on every request:
+    a directory listing + at most N small JSON reads.
+    """
+    voices_dir = Path(voices_dir)
+    out: dict[str, list[dict]] = {}
+
+    def _add(lang: str, entry: dict) -> None:
+        out.setdefault(lang, []).append(entry)
+
+    if not voices_dir.is_dir():
+        return {k: list(v) for k, v in VOICE_CATALOG.items()}
+
+    # Track which ids we've already emitted so the "always advertise default"
+    # epilogue doesn't double-up when a real `default.wav` exists on disk.
+    seen: set[str] = set()
+    for ext in _VOICE_EXTS:
+        for wav_path in sorted(voices_dir.glob(f"*.{ext}")):
+            vid = wav_path.stem
+            if vid in seen:
+                continue
+            seen.add(vid)
+            # Sidecar JSON is optional. If it's malformed we just drop the
+            # metadata — never let a bad sidecar make the voice disappear.
+            meta: dict = {}
+            sidecar = voices_dir / f"{vid}.json"
+            if sidecar.is_file():
+                try:
+                    meta = json.loads(sidecar.read_text(encoding="utf-8")) or {}
+                    if not isinstance(meta, dict):
+                        meta = {}
+                except Exception:
+                    meta = {}
+            # `default` keeps the original VOICE_CATALOG metadata when no
+            # sidecar overrides it — preserves the "Default voice" + gender
+            # label that older clients expect to see in the dropdown.
+            if vid == "default" and not meta:
+                fallback_default = VOICE_CATALOG["en"][0]
+                entry = dict(fallback_default)
+            else:
+                entry = {
+                    "id": vid,
+                    "name": str(meta.get("name") or _voice_display_name(vid)),
+                }
+                if meta.get("gender"):
+                    entry["gender"] = str(meta["gender"])
+            if vid == "default":
+                # Default voice is always available under BOTH builtin
+                # languages so older clients (that hard-code en/es buckets
+                # for fallback selection) still find it.
+                _add("en", entry)
+                _add("es", entry)
+            else:
+                lang = str(meta.get("language") or "en").lower()
+                _add(lang, entry)
+    # Always advertise `default` — if no `default.wav` was found on disk,
+    # fall back to the static catalog entry under both en/es so the dropdown
+    # never goes empty (synth-time `_wav_for` does the same fallback in
+    # reverse — picks `default.wav` if the requested voice is missing).
+    if "default" not in seen:
+        fallback = VOICE_CATALOG["en"][0]
+        _add("en", dict(fallback))
+        _add("es", dict(fallback))
+    return out
 
 # Chatterbox always emits 22050 Hz mono int16 audio.
 CHATTERBOX_SR = 22_050

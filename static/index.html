@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice Studio · miniclosedai-voice</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Voice Studio</h1>
+    <p class="sub">Record a sample, clone the voice, use it from MiniClosedAI's TTS dropdown.</p>
+  </header>
+
+  <main class="container">
+    <!-- ============= Recorder + uploader ============= -->
+    <section class="card recorder">
+      <div class="recorder-row">
+        <button id="record-btn" type="button" class="btn btn-primary btn-record">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="record-btn-label">Start recording</span>
+        </button>
+        <span id="record-timer" class="timer" aria-live="polite">0:00</span>
+        <div id="level-meter" class="level-meter" aria-hidden="true"><div id="level-meter-bar"></div></div>
+      </div>
+      <div class="recorder-row">
+        <span class="or-sep" aria-hidden="true">or</span>
+        <button id="upload-btn" type="button" class="btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
+          Upload audio file
+        </button>
+        <input id="upload-input" type="file" accept="audio/wav,audio/mpeg,audio/mp4,audio/x-m4a,audio/ogg,audio/flac,audio/webm,audio/*" hidden />
+      </div>
+      <p class="hint">
+        Record live (mic required), or upload a 5–30 s audio clip
+        (WAV, MP3, M4A, OGG, FLAC). Aim for clean, natural speech with no
+        background noise — Chatterbox clones the speaker from a single sample.
+      </p>
+      <p id="record-error" class="error" hidden></p>
+    </section>
+
+    <!-- ============= Review + save (revealed after stop) ============= -->
+    <section id="save-card" class="card save" hidden>
+      <h2>Save this clone</h2>
+      <audio id="playback" controls preload="metadata"></audio>
+      <form id="save-form" class="save-form">
+        <label class="field">
+          <span>Name</span>
+          <input id="name-input" type="text" maxlength="60" required
+                 placeholder="e.g. Edgar's voice" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>Language</span>
+          <select id="lang-input">
+            <option value="en" selected>English</option>
+            <option value="es">Spanish</option>
+          </select>
+        </label>
+        <div class="save-actions">
+          <button id="discard-btn" type="button" class="btn btn-secondary">Discard</button>
+          <button id="save-btn" type="submit" class="btn btn-primary">Save voice</button>
+        </div>
+        <p id="save-error" class="error" hidden></p>
+      </form>
+    </section>
+
+    <!-- ============= Voices list ============= -->
+    <section class="card voices">
+      <div class="voices-head">
+        <h2>Voices</h2>
+        <button id="refresh-btn" type="button" class="btn btn-secondary" title="Reload catalog">Refresh</button>
+      </div>
+      <ul id="voices-list" class="voices-list" aria-live="polite"></ul>
+      <p id="voices-empty" class="hint" hidden>No voices yet. Record one above to get started.</p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
