@@ -8,8 +8,38 @@
  */
 
 const MAX_RECORD_SECONDS = 30;
-const TARGET_SAMPLE_RATE = 22050;   // Chatterbox's native rate; what we ship to the server
+// Sample rate hint — but the encoder NO LONGER resamples in the browser.
+// We send WAVs at whatever rate AudioContext captured at (typically 48 kHz)
+// and let the server handle resampling to 24 kHz with librosa's polyphase
+// filter — the SAME resampler chatterbox itself uses internally.
+// Crude linear interpolation in JS (with no anti-aliasing) was injecting
+// aliasing artifacts; doing it server-side with librosa avoids that.
+const TARGET_SAMPLE_RATE = 24000;
 const SAMPLE_GREETING = "Hello! This is a quick sample of your cloned voice.";
+
+// Reading scripts for the user to speak when recording. Each one runs ~8–12 s
+// at conversational pace, covers a wide phoneme range so Chatterbox gets a
+// phonetically diverse reference clip. The user sees these in the recorder
+// card, can shuffle through them, and can switch language (EN ↔ ES) — the
+// chosen language is remembered across visits via localStorage.
+const READ_PROMPTS = {
+  en: [
+    "The quick brown fox jumps over the lazy dog. Bright stars shine above the silent meadow, while gentle music drifts through the evening air.",
+    "Please call Stella. Ask her to bring these things with her from the store: six spoons of fresh snow peas, five thick slabs of blue cheese, and maybe a snack for her brother Bob.",
+    "On a cold morning, the train arrived quietly at the station. Travelers stepped onto the platform with warm coats, eager to begin their journeys through the countryside.",
+    "Hello, today I am recording a short voice sample. The weather is calm, the room is quiet, and I hope this clip captures my natural speaking voice clearly.",
+    "A thousand tiny lights twinkled across the bay as the ferry pulled into the harbor, and the salty breeze carried the sound of distant laughter and music.",
+  ],
+  es: [
+    "El veloz murciélago hindú comía feliz cardillo y kiwi. La cigüeña tocaba el saxofón detrás del palenque de paja, mientras la luna brillaba sobre el río tranquilo.",
+    "Hola, hoy estoy grabando una muestra corta de mi voz. El clima está calmado, la habitación está silenciosa, y espero que este audio capture mi forma natural de hablar.",
+    "El sol se asomaba entre las nubes mientras los pájaros cantaban en los árboles del parque. Una brisa suave traía el aroma del café recién hecho desde la cocina.",
+    "Camino por la playa al atardecer, escuchando el sonido de las olas y sintiendo la arena tibia bajo los pies. Las gaviotas vuelan bajo, casi rozando el agua salada.",
+    "En la ciudad nunca duerme la música. Por las calles se mezclan acordes de guitarra, voces alegres, risas en cafés y el ritmo constante de pasos sobre el adoquín.",
+  ],
+};
+const LANG_KEY = "miniclosedai-voice:readPromptLang";   // localStorage key
+let _readPromptLang = "en";   // mutated by setReadLang() / restored on boot
 
 // ─────────────── DOM refs (single, named lookups so init is fast) ───────────
 const els = {
@@ -33,7 +63,54 @@ const els = {
   voicesEmpty:      document.getElementById("voices-empty"),
   refreshBtn:       document.getElementById("refresh-btn"),
   toast:            document.getElementById("toast"),
+  readPromptText:    document.getElementById("read-prompt-text"),
+  readPromptShuffle: document.getElementById("read-prompt-shuffle"),
+  readPromptLangEn:  document.getElementById("read-prompt-lang-en"),
+  readPromptLangEs:  document.getElementById("read-prompt-lang-es"),
+  saveCardLang:      document.getElementById("lang-input"),
 };
+
+// Index of the script currently shown WITHIN the current language pool.
+// `setReadPrompt(undefined)` picks a different one at random so the shuffle
+// button always changes something. Switching languages resets to index 0.
+let _readPromptIdx = -1;
+function setReadPrompt(idx) {
+  const pool = READ_PROMPTS[_readPromptLang] || READ_PROMPTS.en;
+  if (typeof idx !== "number") {
+    if (pool.length <= 1) { idx = 0; }
+    else {
+      do { idx = Math.floor(Math.random() * pool.length); }
+      while (idx === _readPromptIdx);
+    }
+  }
+  _readPromptIdx = idx;
+  if (els.readPromptText) els.readPromptText.textContent = pool[idx];
+}
+
+// Switch the active language for the read-aloud script + persist it.
+// Side-effect: also pre-selects the matching option in the save-form's
+// Language dropdown, because the user will almost always want their voice
+// labeled with the language they just recorded in.
+function setReadLang(lang) {
+  if (lang !== "en" && lang !== "es") return;
+  _readPromptLang = lang;
+  try { localStorage.setItem(LANG_KEY, lang); } catch (_) {}
+  // Toggle button styles + aria.
+  if (els.readPromptLangEn) {
+    els.readPromptLangEn.classList.toggle("active", lang === "en");
+    els.readPromptLangEn.setAttribute("aria-pressed", String(lang === "en"));
+  }
+  if (els.readPromptLangEs) {
+    els.readPromptLangEs.classList.toggle("active", lang === "es");
+    els.readPromptLangEs.setAttribute("aria-pressed", String(lang === "es"));
+  }
+  // Default the save-form's language dropdown to match — easy correction
+  // if user wants otherwise, but matches the common case.
+  if (els.saveCardLang) els.saveCardLang.value = lang;
+  // Reset to the first script in the new pool so the user sees a fresh
+  // language-appropriate sentence immediately.
+  setReadPrompt(0);
+}
 
 // ─────────────── Recorder state ─────────────────────────────────────────────
 const recorder = {
@@ -236,7 +313,8 @@ async function stopRecording() {
     resetRecorderState();
     return;
   }
-  const blob = encodeWav(recorder.chunks, recorder.sampleRate, TARGET_SAMPLE_RATE);
+  // Encode at the source rate (no JS-side resample — server uses librosa).
+  const blob = encodeWav(recorder.chunks, recorder.sampleRate, recorder.sampleRate);
   recorder.capturedWavBlob = blob;
   els.playback.src = URL.createObjectURL(blob);
   els.saveCard.hidden = false;
@@ -335,7 +413,8 @@ async function loadAudioFile(file) {
   }
 
   // Reuse the recorder's encoder so the wire format is byte-identical.
-  const blob = encodeWav([mono], audioBuffer.sampleRate, TARGET_SAMPLE_RATE);
+  // Encode at the source rate (no JS-side resample — server uses librosa).
+  const blob = encodeWav([mono], audioBuffer.sampleRate, audioBuffer.sampleRate);
   if (els.playback.src) URL.revokeObjectURL(els.playback.src);
   recorder.capturedWavBlob = blob;
   els.playback.src = URL.createObjectURL(blob);
@@ -545,6 +624,12 @@ function bind() {
   els.discardBtn.addEventListener("click", discardRecording);
   els.saveForm.addEventListener("submit", saveVoice);
   els.refreshBtn.addEventListener("click", loadVoices);
+  if (els.readPromptShuffle) {
+    // No-arg call → setReadPrompt picks a different random index.
+    els.readPromptShuffle.addEventListener("click", () => setReadPrompt());
+  }
+  if (els.readPromptLangEn) els.readPromptLangEn.addEventListener("click", () => setReadLang("en"));
+  if (els.readPromptLangEs) els.readPromptLangEs.addEventListener("click", () => setReadLang("es"));
   // Esc cancels recording / discards save-card.
   window.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
@@ -554,4 +639,13 @@ function bind() {
 }
 
 bind();
+// Restore the user's preferred script language across visits, defaulting to
+// English. setReadLang() also calls setReadPrompt(0), so we don't need a
+// separate setReadPrompt() boot call.
+try {
+  const saved = localStorage.getItem(LANG_KEY);
+  setReadLang(saved === "es" ? "es" : "en");
+} catch (_) {
+  setReadLang("en");
+}
 loadVoices();

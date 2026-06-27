@@ -16,6 +16,22 @@
   <main class="container">
     <!-- ============= Recorder + uploader ============= -->
     <section class="card recorder">
+      <div class="read-prompt">
+        <div class="read-prompt-head">
+          <span class="read-prompt-label">Read this aloud (≈ 10 seconds):</span>
+          <div class="read-prompt-controls">
+            <div class="lang-toggle" role="group" aria-label="Script language">
+              <button id="read-prompt-lang-en" type="button" class="lang-toggle-btn active"
+                      data-lang="en" aria-pressed="true">EN</button>
+              <button id="read-prompt-lang-es" type="button" class="lang-toggle-btn"
+                      data-lang="es" aria-pressed="false">ES</button>
+            </div>
+            <button id="read-prompt-shuffle" type="button" class="read-prompt-shuffle"
+                    title="Try a different script" aria-label="Shuffle script">↻ New script</button>
+          </div>
+        </div>
+        <p id="read-prompt-text" class="read-prompt-text"></p>
+      </div>
       <div class="recorder-row">
         <button id="record-btn" type="button" class="btn btn-primary btn-record">
           <span class="dot" aria-hidden="true"></span>

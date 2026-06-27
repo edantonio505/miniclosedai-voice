@@ -114,6 +114,96 @@ body {
 }
 .btn-danger:hover { background: var(--danger-soft); border-color: var(--danger); }
 
+/* ============ Read-aloud prompt (above the recorder rows) ============ */
+.read-prompt {
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+.read-prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.read-prompt-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* EN / ES segmented control — two-button language toggle */
+.lang-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.lang-toggle-btn {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--border-strong);
+  padding: 3px 9px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.lang-toggle-btn:last-child { border-right: 0; }
+.lang-toggle-btn:hover { color: var(--text); }
+.lang-toggle-btn.active {
+  background: var(--accent);
+  color: white;
+}
+.lang-toggle-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+  z-index: 1;
+}
+.read-prompt-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+.read-prompt-shuffle {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.read-prompt-shuffle:hover {
+  background: var(--bg);
+  border-color: var(--border-strong);
+}
+.read-prompt-shuffle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.read-prompt-text {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.5;
+  font-style: italic;
+  color: var(--text);
+}
+.read-prompt-text::before { content: "“"; margin-right: 2px; }
+.read-prompt-text::after  { content: "”"; margin-left: 2px; }
+
 /* ============ Recorder ============ */
 .recorder-row {
   display: flex;

@@ -165,6 +165,34 @@ _TOP_P        = 0.95
 _REP_PENALTY  = 1.1
 _EXAGGERATION = 0.7   # how much emotion the voice reference imposes
 
+# Post-process pitch + speed adjustment, applied to every synthesized chunk
+# AFTER the vocoder. Raw chatterbox output tends to land 1-2 semitones below
+# the reference speaker's natural pitch — a known property of the model. The
+# proven RunPod handler (`asr_tts_runpod_bcp/.../handler.py`) corrects this
+# by resampling each chunk by a small ratio: the SAME number of samples
+# becomes fewer, and when played back at the declared sample rate the audio
+# is BOTH higher-pitched and faster by that ratio.
+#
+# Defaults match the RunPod handler (PITCH_SHIFT_STEPS=-2, SPEED_FACTOR=1.2)
+# which combine to a resample ratio of about 1.069 (≈ pitch up 6.9%, ≈ speed
+# up 6.9%). The variable names are RunPod's; their math is
+#   combined_ratio = SPEED_FACTOR * 2 ** (PITCH_SHIFT_STEPS / 12)
+# Override at runtime:
+#   VOICE_PITCH_SHIFT_STEPS=0  + VOICE_SPEED_FACTOR=1.0  → disable adjustment
+#   VOICE_PITCH_SHIFT_STEPS=-3 + VOICE_SPEED_FACTOR=1.3  → more aggressive
+import os
+from fractions import Fraction
+_PITCH_SHIFT_STEPS = float(os.environ.get("VOICE_PITCH_SHIFT_STEPS", "-2"))
+_SPEED_FACTOR      = float(os.environ.get("VOICE_SPEED_FACTOR",      "1.2"))
+_combined_ratio    = _SPEED_FACTOR * (2.0 ** (_PITCH_SHIFT_STEPS / 12.0))
+_frac              = Fraction(_combined_ratio).limit_denominator(200)
+# Critical: _up := denominator, _down := numerator (RunPod's exact ordering).
+# resample_poly(audio, up, down) returns audio at SR * up/down — with
+# numerator > denominator, the output is SHORTER, which when played at the
+# original SR sounds higher-pitched + faster (the intended effect).
+_RESAMPLE_UP   = _frac.denominator
+_RESAMPLE_DOWN = _frac.numerator
+
 
 class TTS:
     """Chatterbox Turbo TTS, ported from tts_server.py's streaming pattern."""
@@ -329,6 +357,14 @@ class TTS:
                         n_cfm_timesteps=_N_CFM_STEPS,
                     )
                     audio = wav.squeeze(0).detach().cpu().numpy().astype(np.float32)
+                    # Post-process pitch + speed adjustment — RunPod's trick
+                    # for nudging chatterbox output toward the reference's
+                    # natural pitch. See the _PITCH_SHIFT_STEPS / _SPEED_FACTOR
+                    # block near the top of this file for the math. Skipped
+                    # cleanly when the user disables the effect (ratio == 1).
+                    if _RESAMPLE_UP != _RESAMPLE_DOWN:
+                        from scipy.signal import resample_poly
+                        audio = resample_poly(audio, _RESAMPLE_UP, _RESAMPLE_DOWN).astype(np.float32)
                     yield audio
                     pending = []
 

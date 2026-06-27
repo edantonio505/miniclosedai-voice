@@ -223,7 +223,7 @@ You get a small **Voice Studio** page that lets you:
    Chatterbox's docs recommend.
 2. **Name** the voice (e.g. *"Edgar's voice"*) and pick a language
    (English / Spanish).
-3. **Save** — the server normalises the audio to 22050 Hz mono 16-bit PCM
+3. **Save** — the server normalises the audio to 24000 Hz mono 16-bit PCM
    and writes both `voices/<slug>.wav` and a sidecar `voices/<slug>.json`
    carrying the display name + language.
 

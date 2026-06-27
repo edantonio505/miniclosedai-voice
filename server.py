@@ -156,7 +156,7 @@ def voices(_=Depends(_require_auth)):
 # ---------------------------------------------------------------------------
 # The GUI records audio in the browser, encodes it as a WAV blob, and POSTs
 # it here with a display name + language. The server validates the WAV,
-# resamples to Chatterbox's native 22050 Hz mono int16, and writes both the
+# resamples to Chatterbox's reference rate (24000 Hz mono int16), and writes both the
 # audio (`<id>.wav`) and a sidecar JSON (`<id>.json`) carrying the display
 # metadata so subsequent GET /voices calls can show the friendly name.
 #
@@ -215,7 +215,7 @@ async def upload_voice(
 
     Returns: 201 {voice_id, name, language, duration_sec, sample_rate}
 
-    The WAV is normalised on disk to 22050 Hz mono int16 (Chatterbox's native
+    The WAV is normalised on disk to 24000 Hz mono int16 (Chatterbox's reference
     rate) so the catalog stays uniform regardless of what the browser sent.
     """
     if not audio.filename:
@@ -244,20 +244,21 @@ async def upload_voice(
     if duration_sec > _VOICE_MAX_DURATION_SEC:
         raise HTTPException(400, f"Recording too long ({duration_sec:.2f} s; max {_VOICE_MAX_DURATION_SEC} s).")
 
-    # Downmix to mono if needed, then resample to 22050 Hz via simple linear
-    # interpolation (good enough for speaker conditioning — Chatterbox isn't
-    # picky here, and we avoid pulling scipy/torchaudio just for this).
+    # Downmix to mono if needed, then resample to 24000 Hz with librosa —
+    # the SAME resampler chatterbox's `prepare_conditionals` uses internally
+    # (via `librosa.load(sr=S3GEN_SR=24000)`). librosa applies a polyphase
+    # anti-aliasing filter; linear interpolation in the browser (or here)
+    # introduces audible aliasing that the reference encoder reads as a
+    # "darker" speaker timbre — making cloned voices sound dull / lower-
+    # pitched than the source. 24000 Hz matches the proven RunPod handler's
+    # brooke_voice_ref.wav natively (no resampling round-trip on the
+    # chatterbox side). Note: chatterbox OUTPUTS at 22050, a DIFFERENT
+    # number that's irrelevant to the reference-clip encoding path.
+    import librosa
     mono = data.mean(axis=1).astype(np.float32)
-    target_sr = 22_050
+    target_sr = 24_000
     if sample_rate != target_sr:
-        ratio = target_sr / float(sample_rate)
-        new_len = int(round(mono.shape[0] * ratio))
-        if new_len <= 0:
-            raise HTTPException(400, "Resample produced zero samples.")
-        # np.interp with float32 xs / ys; cheap, no extra deps.
-        xs_old = np.arange(mono.shape[0], dtype=np.float32)
-        xs_new = np.linspace(0, mono.shape[0] - 1, new_len, dtype=np.float32)
-        mono = np.interp(xs_new, xs_old, mono).astype(np.float32)
+        mono = librosa.resample(mono, orig_sr=int(sample_rate), target_sr=target_sr)
     # Hard-clip to int16 range, dither-free (the source is already PCM).
     pcm_i16 = np.clip(mono * 32767.0, -32768, 32767).astype(np.int16)
 
@@ -719,9 +720,27 @@ except Exception:
 # Skipped silently if the `static/` directory isn't present so a bare-bones
 # `python -m uvicorn server:app` for API-only debugging still works.
 # ---------------------------------------------------------------------------
+class _NoCacheStatics(StaticFiles):
+    """StaticFiles subclass that disables browser caching of the GUI assets.
+
+    Without this, browsers hold onto the previous `app.js` / `style.css` /
+    `index.html` aggressively — users see stale UI (empty paragraphs,
+    missing buttons, old behaviour) after a server-side change and need to
+    hard-refresh to pick up the new files. This is the same `_NoCacheStatics`
+    pattern MiniClosedAI uses (app.py:3306 there) — local dev tool, no
+    measurable cost at the bandwidth scale this service runs at.
+    """
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+
 _STATIC_DIR = Path(__file__).parent / "static"
 if _STATIC_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
+    app.mount("/", _NoCacheStatics(directory=str(_STATIC_DIR), html=True), name="static")
 
 
 if __name__ == "__main__":
