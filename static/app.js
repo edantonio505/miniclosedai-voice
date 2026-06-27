@@ -638,7 +638,67 @@ function bind() {
   });
 }
 
+// ─────────────── Theme toggle ───────────────────────────────────────────────
+// Cycles System → Light → Dark. The active mode is persisted to localStorage
+// and re-applied before paint via a tiny inline script in index.html (so the
+// page never flashes the wrong theme on load). In "system" mode we honour
+// prefers-color-scheme; in explicit "light"/"dark" the user override wins.
+const THEME_KEY = "miniclosedai-voice:theme";
+const THEME_MODES = ["system", "light", "dark"];
+
+function systemPrefersDark() {
+  return matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+function effectiveDark(mode) {
+  if (mode === "dark") return true;
+  if (mode === "light") return false;
+  return systemPrefersDark();   // system
+}
+
+function applyTheme(mode) {
+  document.documentElement.classList.toggle("dark", effectiveDark(mode));
+  // Show only the icon corresponding to the active mode.
+  const ids = { system: "theme-icon-system", light: "theme-icon-light", dark: "theme-icon-dark" };
+  for (const m of THEME_MODES) {
+    const el = document.getElementById(ids[m]);
+    if (el) el.style.display = (m === mode) ? "" : "none";
+  }
+  const btn = document.getElementById("theme-toggle");
+  if (btn) {
+    btn.title = `Theme: ${mode}`;
+    btn.setAttribute("aria-label", `Theme: ${mode}. Click to cycle.`);
+  }
+}
+
+function initTheme() {
+  let mode;
+  try { mode = localStorage.getItem(THEME_KEY) || "system"; } catch { mode = "system"; }
+  if (!THEME_MODES.includes(mode)) mode = "system";
+  applyTheme(mode);
+
+  const btn = document.getElementById("theme-toggle");
+  if (btn) {
+    btn.addEventListener("click", () => {
+      const cur = (function() {
+        try { return localStorage.getItem(THEME_KEY) || "system"; } catch { return "system"; }
+      })();
+      const next = THEME_MODES[(THEME_MODES.indexOf(cur) + 1) % THEME_MODES.length];
+      try { localStorage.setItem(THEME_KEY, next); } catch (_) {}
+      applyTheme(next);
+    });
+  }
+  // While in "system" mode, react to live OS theme changes.
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    try {
+      const m = localStorage.getItem(THEME_KEY) || "system";
+      if (m === "system") applyTheme("system");
+    } catch (_) {}
+  });
+}
+
 bind();
+initTheme();
 // Restore the user's preferred script language across visits, defaulting to
 // English. setReadLang() also calls setReadPrompt(0), so we don't need a
 // separate setReadPrompt() boot call.

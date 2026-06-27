@@ -6,11 +6,34 @@
   <title>Voice Studio · miniclosedai-voice</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="stylesheet" href="style.css" />
+  <!-- Apply saved theme BEFORE paint to avoid flash-of-wrong-theme.
+       Inline script intentionally — must run synchronously before any
+       stylesheet rule kicks in. Matches MiniClosedAI's boot pattern. -->
+  <script>
+    (function() {
+      try {
+        const saved = localStorage.getItem("miniclosedai-voice:theme") || "system";
+        const systemDark = matchMedia("(prefers-color-scheme: dark)").matches;
+        const useDark = saved === "dark" || (saved === "system" && systemDark);
+        if (useDark) document.documentElement.classList.add("dark");
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
   <header class="topbar">
-    <h1>Voice Studio</h1>
-    <p class="sub">Record a sample, clone the voice, use it from MiniClosedAI's TTS dropdown.</p>
+    <div class="topbar-text">
+      <h1>Voice Studio</h1>
+      <p class="sub">Record a sample, clone the voice, use it from MiniClosedAI's TTS dropdown.</p>
+    </div>
+    <!-- Theme cycle: System → Light → Dark. Sun/moon/monitor icons; only
+         one is visible at a time (toggled by JS). Matches the pattern from
+         MiniClosedAI's main app so the two surfaces feel consistent. -->
+    <button id="theme-toggle" class="theme-toggle-btn" title="Theme: system" aria-label="Toggle theme">
+      <svg id="theme-icon-light" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      <svg id="theme-icon-dark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      <svg id="theme-icon-system" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+    </button>
   </header>
 
   <main class="container">

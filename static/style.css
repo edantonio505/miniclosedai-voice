@@ -2,7 +2,31 @@
    Tracks the same palette / radii / spacing rhythm as MiniClosedAI's main
    app so the two surfaces feel like one product. */
 
+/* Light theme is the default — flips to dark when the <html> element has
+   .dark (set by the boot script in index.html based on saved preference
+   or, when in "system" mode, prefers-color-scheme). Class-based dark
+   mode beats the OS-only media query: the user can override their OS
+   via the theme toggle and the preference persists across visits. */
 :root {
+  --bg: #f6f7fa;
+  --panel: #ffffff;
+  --panel-hover: #eef0f5;
+  --border: #d8dce4;
+  --border-strong: #b3bbcb;
+  --text: #1a1d24;
+  --text-muted: #5b6473;
+  --accent: #5b8df9;
+  --accent-soft: rgba(91, 141, 249, 0.18);
+  --accent-ring: rgba(91, 141, 249, 0.45);
+  --danger: #e2725c;
+  --danger-soft: rgba(226, 114, 92, 0.15);
+  --ok: #4cba8a;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --shadow-md: 0 4px 16px rgba(15, 17, 21, 0.08);
+  --t-fast: 120ms ease;
+}
+:root.dark {
   --bg: #0f1115;
   --panel: #171a21;
   --panel-hover: #1e222b;
@@ -10,29 +34,8 @@
   --border-strong: #3a4150;
   --text: #e4e6ec;
   --text-muted: #8a93a4;
-  --accent: #5b8df9;
   --accent-soft: rgba(91, 141, 249, 0.15);
-  --accent-ring: rgba(91, 141, 249, 0.45);
-  --danger: #e2725c;
-  --danger-soft: rgba(226, 114, 92, 0.15);
-  --ok: #4cba8a;
-  --r-sm: 6px;
-  --r-md: 10px;
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
-  --t-fast: 120ms ease;
-}
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f6f7fa;
-    --panel: #ffffff;
-    --panel-hover: #eef0f5;
-    --border: #d8dce4;
-    --border-strong: #b3bbcb;
-    --text: #1a1d24;
-    --text-muted: #5b6473;
-    --accent-soft: rgba(91, 141, 249, 0.18);
-    --shadow-md: 0 4px 16px rgba(15, 17, 21, 0.08);
-  }
 }
 
 * { box-sizing: border-box; }
@@ -50,9 +53,44 @@ body {
   padding: 24px 24px 8px;
   max-width: 760px;
   margin: 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
 }
+.topbar-text { flex: 1 1 auto; min-width: 0; }
 .topbar h1 { margin: 0 0 4px; font-size: 24px; letter-spacing: -0.01em; }
 .topbar .sub { margin: 0; color: var(--text-muted); }
+
+/* Theme toggle — Sun / Moon / Monitor cycle button. Sits in the top-right
+   of the header. Hover lights it up subtly; only one of the three SVG
+   icons is visible at a time (toggled by JS). */
+.theme-toggle-btn {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.theme-toggle-btn:hover {
+  background: var(--panel-hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.theme-toggle-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.theme-toggle-btn svg {
+  width: 18px;
+  height: 18px;
+}
 
 .container {
   max-width: 760px;
