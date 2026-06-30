@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# vc — terminal client for the miniclosedai-voice service.
+# Thin wrapper: runs cli.py with the project venv if present, else system python3.
+# The CLI is stdlib-only, so either works (and it can be copied to any machine
+# and run with a bare `python3 cli.py ...` — see the README's remote-access notes).
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$DIR/env/bin/python" ]; then
+  PY="$DIR/env/bin/python"
+elif [ -x "$DIR/.venv/bin/python" ]; then
+  PY="$DIR/.venv/bin/python"
+else
+  PY="$(command -v python3 || command -v python)"
+fi
+exec "$PY" "$DIR/cli.py" "$@"

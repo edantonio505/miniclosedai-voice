@@ -128,6 +128,71 @@ Call mode is the long-running WebRTC path; push-to-talk uses
 
 ---
 
+## Terminal CLI (`vc`)
+
+`cli.py` (run via the `vc` wrapper) is a terminal client for the voice service —
+the same actions as the Voice Studio GUI, scriptable from the shell. It's a
+**thin HTTP client over the same endpoints the browser uses**, so the two stay in
+live sync (clone a voice from the terminal → it shows in the GUI and in every
+MiniClosedAI bot's TTS dropdown, and vice-versa). It mirrors the `mc` CLI from
+`miniclosedai-llm` and the `mcai` CLI from `miniclosedai`; the names differ so all
+three can coexist.
+
+**Dependency-free** — standard library only (argparse + urllib + json + ssl), so
+it runs under any `python3` with no venv, and the single `cli.py` can be copied to
+another machine and pointed at a remote service (see below).
+
+```
+./vc status                                  # health + connect URL + voice count
+./vc url                                      # base URL to register in MiniClosedAI
+./vc voices                                   # list voices  (--json for raw catalog)
+./vc speak "hello world" --out hello.wav      # synthesize → WAV (prints the path)
+./vc speak "hi" --voice ed2 --play --stream   # pick a voice, stream, play it
+./vc transcribe clip.wav                      # audio → text  (--json for segments)
+./vc clone sample.wav --name "Edgar"          # clone a voice from a WAV
+./vc rm edgar                                 # remove a voice (forgiving id match)
+./vc serve                                    # start the service (runs ./dev.sh up)
+```
+
+Voice ids are forgiving — `vc speak … --voice edg` or `vc rm edg` matches `edgar`.
+Read commands take `--json` for scripting. Configure the target with environment
+variables, and exit codes are stable for automation:
+
+| Var | Default | Description |
+|---|---|---|
+| `VOICE_URL` | _(unset)_ | Full base URL override (else `https://localhost:$VOICE_PORT`, with http fallback) |
+| `VOICE_PORT` | `8090` | Port used when `VOICE_URL` is unset |
+| `VOICE_API_KEY` | _(unset)_ | Sent as `Authorization: Bearer …` (matches the service's own `VOICE_API_KEY`) |
+| `VOICE_VERIFY` | `0` | `1` enforces TLS cert verification (off by default for the self-signed dev cert) |
+
+Exit codes: `0` ok · `1` operation error · `2` service unreachable / unauthorized.
+
+Tip: symlink it into your PATH — `ln -s "$PWD/vc" ~/.local/bin/vc` — then `vc ls`
+from anywhere.
+
+### Remote / agent access
+
+Because the service binds `0.0.0.0` and the CLI is a single dependency-free file,
+a coding/agent LLM on a **different machine** can drive the whole voice service
+from the terminal. Copy `cli.py` over and point it at the host:
+
+```
+scp you@voice-host:~/miniclosedai-voice/cli.py .
+VOICE_URL=https://<host>:8090 python3 cli.py voices
+VOICE_URL=https://<host>:8090 python3 cli.py speak "hello from afar" --out out.wav
+```
+
+Or hit the endpoints directly with `curl` (no SDK; `-k` for the self-signed cert):
+
+```
+curl -sk https://<host>:8090/voices
+curl -sk https://<host>:8090/api/connect-info        # base_url to paste into MiniClosedAI
+curl -sk https://<host>:8090/speak -H 'Content-Type: application/json' \
+  -d '{"text":"hello","voice":"default","language":"en"}' -o out.wav
+```
+
+---
+
 ## What's inside
 
 | Layer | Library | Model | Notes |
