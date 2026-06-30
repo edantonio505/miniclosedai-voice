@@ -23,6 +23,7 @@ import io
 import json
 import logging
 import os
+import socket
 from pathlib import Path
 
 # WebRTC debugging — surface ICE state changes, peer connection lifecycle,
@@ -33,15 +34,19 @@ logging.basicConfig(level=logging.INFO)
 for name in ("aiortc", "aioice", "fastrtc", "voice.call"):
     logging.getLogger(name).setLevel(logging.DEBUG)
 
+import re
+from datetime import datetime, timezone
+
 import numpy as np
 import soundfile as sf
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from asr import ASR
-from tts import TTS, VOICE_CATALOG
+from tts import TTS, VOICE_CATALOG, scan_voice_catalog
 from call import BotCallHandler
 
 # ---------------------------------------------------------------------------
@@ -134,11 +139,248 @@ def health():
     }
 
 
+def _lan_ip() -> str:
+    """Best-effort primary LAN IP of this host (e.g. 192.168.0.110).
+
+    Opens a throwaway UDP socket toward a public address so the kernel picks
+    the interface it would actually route through, then reads back the local
+    side. No packet is sent. Returns "" if it can't be determined (no network),
+    so the caller can fall back to localhost.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return ""
+
+
+@app.get("/api/connect-info")
+def connect_info(request: Request):
+    """The base URL to paste into MiniClosedAI (Settings → Add endpoint,
+    Kind: voice). Mirrors the copy-able base_url miniclosedai-llm exposes for
+    its model servers, but for this whole voice service rather than per-model.
+
+    - base_url:     reachable from another machine on the LAN (or this host).
+                    Scheme is whatever the GUI is being served over (https
+                    behind the dev cert, http with --http); host is the LAN IP
+                    so a miniclosedai running elsewhere can reach back, with
+                    VOICE_PUBLIC_HOST / RUNPOD_POD_ID overrides for hosted pods.
+    - alt_base_url: for a miniclosedai running as a Docker container on THIS
+                    same host — it reaches the service via the host gateway.
+    """
+    scheme = request.url.scheme  # 'https' behind the dev cert, 'http' with --http
+    host_override = (
+        os.environ.get("VOICE_PUBLIC_HOST")
+        or os.environ.get("PUBLIC_HOST")
+        or os.environ.get("ADVERTISE_HOST")
+    )
+    pod = os.environ.get("RUNPOD_POD_ID")
+    if pod and not host_override:
+        base_url = f"https://{pod}-{PORT}.proxy.runpod.net"
+    else:
+        host = host_override or _lan_ip() or "localhost"
+        base_url = f"{scheme}://{host}:{PORT}"
+    return {
+        "kind": "voice",
+        "base_url": base_url,
+        "alt_base_url": f"http://host.docker.internal:{PORT}",
+        "auth_required": bool(API_KEY),
+    }
+
+
 @app.get("/voices")
 def voices(_=Depends(_require_auth)):
-    """The static catalog — same shape MiniClosedAI's voice.py reshapes for
-    the per-bot Voice + Language dropdowns."""
-    return VOICE_CATALOG
+    """Live catalog of available TTS voices, built by scanning VOICE_VOICES_DIR
+    on every call. Shape matches what MiniClosedAI's voice.py reshapes for
+    the per-bot Voice picker: `{lang: [{id, name, gender?}, ...], ...}`.
+
+    Dynamic scan (rather than the old hardcoded `VOICE_CATALOG`) means voices
+    cloned via the Voice Studio GUI (`POST /voices`) show up immediately —
+    no service restart needed.
+    """
+    return scan_voice_catalog(TTS_VOICES_DIR)
+
+
+# ---------------------------------------------------------------------------
+# Voice cloning — POST + DELETE for the Voice Studio GUI
+# ---------------------------------------------------------------------------
+# The GUI records audio in the browser, encodes it as a WAV blob, and POSTs
+# it here with a display name + language. The server validates the WAV,
+# resamples to Chatterbox's reference rate (24000 Hz mono int16), and writes both the
+# audio (`<id>.wav`) and a sidecar JSON (`<id>.json`) carrying the display
+# metadata so subsequent GET /voices calls can show the friendly name.
+#
+# The same scan_voice_catalog() the GET path uses picks up the new file on
+# its next invocation — no restart, no in-memory catalog to invalidate.
+
+# 0.5 s minimum: anything shorter is almost certainly an accidental tap and
+# would give Chatterbox no useful speaker conditioning. 35 s ceiling: the UI
+# hard-caps at 30 s; a few seconds of slack tolerates browser timing jitter.
+_VOICE_MIN_DURATION_SEC = 0.5
+_VOICE_MAX_DURATION_SEC = 35.0
+# Cap upload size (~5 MB at 22 kHz mono int16 ≈ 113 s of audio) so a runaway
+# client can't DoS the disk. Generous vs the 30 s recording cap.
+_VOICE_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+# Reserved id — the fallback voice every install ships with. Refused as a
+# slug so a user can't clobber it via the GUI by naming a clone "default".
+_RESERVED_VOICE_IDS = {"default"}
+
+# Languages the Voice Studio dropdown advertises. Anything else (Spanish-only
+# user cloning a Portuguese voice, etc.) is silently bucketed under the
+# requested code; we don't gatekeep — Chatterbox itself is multilingual.
+_KNOWN_LANGUAGES = ("en", "es")
+
+
+def _slugify_voice_name(name: str) -> str:
+    """`"Edgar's Voice!"` → `"edgars-voice"`. Lowercase ascii alnum + dashes,
+    collapsed runs, trimmed, capped at 40 chars. Empty on input gives ""
+    so the caller can 400."""
+    s = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+    return s[:40]
+
+
+def _unique_voice_id(voices_dir: Path, base: str) -> str:
+    """Append `-2`, `-3`, … until no `<id>.wav` exists in `voices_dir`."""
+    candidate = base
+    n = 2
+    while any((voices_dir / f"{candidate}.{ext}").exists() for ext in ("wav", "WAV", "flac")):
+        candidate = f"{base}-{n}"
+        n += 1
+    return candidate
+
+
+@app.post("/voices", status_code=201)
+async def upload_voice(
+    audio: UploadFile = File(...),
+    name: str = Form(..., min_length=1, max_length=60),
+    language: str = Form("en"),
+    _=Depends(_require_auth),
+):
+    """Clone a new voice from an uploaded WAV.
+
+    Body: multipart/form-data
+      audio:    WAV file (browser-recorded; 0.5–35 s, mono or stereo, any SR)
+      name:     human display name (shown in the MiniClosedAI dropdown)
+      language: ISO-639-1 code (`en` / `es` — defaults to en)
+
+    Returns: 201 {voice_id, name, language, duration_sec, sample_rate}
+
+    The WAV is normalised on disk to 24000 Hz mono int16 (Chatterbox's reference
+    rate) so the catalog stays uniform regardless of what the browser sent.
+    """
+    if not audio.filename:
+        raise HTTPException(400, "Missing audio file.")
+    if audio.content_type and not audio.content_type.startswith(("audio/wav", "audio/x-wav", "audio/wave")):
+        # Permissive on the absence of content_type (some browsers omit it);
+        # strict when present — we don't want to silently accept webm/mp3.
+        raise HTTPException(415, f"Unsupported content_type {audio.content_type!r}; expected audio/wav.")
+
+    raw = await audio.read()
+    if not raw:
+        raise HTTPException(400, "Empty audio payload.")
+    if len(raw) > _VOICE_MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"Upload too large ({len(raw)} bytes; max {_VOICE_MAX_UPLOAD_BYTES}).")
+
+    # Decode + validate the WAV via soundfile (round-trips PCM cleanly).
+    try:
+        data, sample_rate = sf.read(io.BytesIO(raw), dtype="float32", always_2d=True)
+    except Exception as e:
+        raise HTTPException(400, f"Could not decode WAV: {e}")
+    if data.size == 0:
+        raise HTTPException(400, "WAV decoded to zero samples.")
+    duration_sec = data.shape[0] / float(sample_rate or 1)
+    if duration_sec < _VOICE_MIN_DURATION_SEC:
+        raise HTTPException(400, f"Recording too short ({duration_sec:.2f} s; min {_VOICE_MIN_DURATION_SEC} s).")
+    if duration_sec > _VOICE_MAX_DURATION_SEC:
+        raise HTTPException(400, f"Recording too long ({duration_sec:.2f} s; max {_VOICE_MAX_DURATION_SEC} s).")
+
+    # Downmix to mono if needed, then resample to 24000 Hz with librosa —
+    # the SAME resampler chatterbox's `prepare_conditionals` uses internally
+    # (via `librosa.load(sr=S3GEN_SR=24000)`). librosa applies a polyphase
+    # anti-aliasing filter; linear interpolation in the browser (or here)
+    # introduces audible aliasing that the reference encoder reads as a
+    # "darker" speaker timbre — making cloned voices sound dull / lower-
+    # pitched than the source. 24000 Hz matches the proven RunPod handler's
+    # brooke_voice_ref.wav natively (no resampling round-trip on the
+    # chatterbox side). Note: chatterbox OUTPUTS at 22050, a DIFFERENT
+    # number that's irrelevant to the reference-clip encoding path.
+    import librosa
+    mono = data.mean(axis=1).astype(np.float32)
+    target_sr = 24_000
+    if sample_rate != target_sr:
+        mono = librosa.resample(mono, orig_sr=int(sample_rate), target_sr=target_sr)
+    # Hard-clip to int16 range, dither-free (the source is already PCM).
+    pcm_i16 = np.clip(mono * 32767.0, -32768, 32767).astype(np.int16)
+
+    # Reserve a slug now; refuse "default" and any empty / unreserved-conflict.
+    base = _slugify_voice_name(name)
+    if not base:
+        raise HTTPException(400, "Name must contain at least one letter or digit.")
+    if base in _RESERVED_VOICE_IDS:
+        raise HTTPException(400, f"`{base}` is a reserved voice id.")
+
+    TTS_VOICES_DIR.mkdir(parents=True, exist_ok=True)
+    voice_id = _unique_voice_id(TTS_VOICES_DIR, base)
+
+    wav_path = TTS_VOICES_DIR / f"{voice_id}.wav"
+    sidecar = TTS_VOICES_DIR / f"{voice_id}.json"
+    try:
+        sf.write(str(wav_path), pcm_i16, target_sr, format="WAV", subtype="PCM_16")
+        sidecar.write_text(
+            json.dumps({
+                "name": name.strip(),
+                "language": (language or "en").lower(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "source_sample_rate": int(sample_rate),
+                "duration_sec": round(duration_sec, 3),
+            }, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        # Clean up partial write so a half-saved voice doesn't poison the catalog.
+        for p in (wav_path, sidecar):
+            try: p.unlink()
+            except OSError: pass
+        raise HTTPException(500, f"Could not write voice files: {e}")
+
+    return {
+        "voice_id": voice_id,
+        "name": name.strip(),
+        "language": (language or "en").lower(),
+        "duration_sec": round(duration_sec, 3),
+        "sample_rate": target_sr,
+    }
+
+
+@app.delete("/voices/{voice_id}")
+def delete_voice(voice_id: str, _=Depends(_require_auth)):
+    """Remove a cloned voice from disk. Refuses `default` (the fallback that
+    keeps the service functional). 404 if no such voice exists."""
+    if voice_id in _RESERVED_VOICE_IDS:
+        raise HTTPException(400, f"`{voice_id}` is reserved and cannot be deleted.")
+    # Match the same extension priority order the catalog scanner uses.
+    found = False
+    for ext in ("wav", "WAV", "flac"):
+        p = TTS_VOICES_DIR / f"{voice_id}.{ext}"
+        if p.exists():
+            try:
+                p.unlink()
+                found = True
+            except OSError as e:
+                raise HTTPException(500, f"Could not delete {p.name}: {e}")
+    sidecar = TTS_VOICES_DIR / f"{voice_id}.json"
+    if sidecar.exists():
+        try:
+            sidecar.unlink()
+        except OSError:
+            pass  # Audio is gone; orphan sidecar will be ignored by the scanner.
+    if not found:
+        raise HTTPException(404, f"No voice with id {voice_id!r}.")
+    return {"ok": True, "voice_id": voice_id}
 
 
 @app.post("/transcribe")
@@ -403,18 +645,6 @@ def _ensure_stream():
 
 
 @app.on_event("startup")
-async def _mount_call_stream():
-    try:
-        _ensure_stream()
-    except Exception:
-        # Don't kill the whole service if fastrtc fails to import — /transcribe
-        # and /speak still work. The /call/configure endpoint will surface the
-        # error if someone tries to use call mode.
-        import traceback
-        traceback.print_exc()
-
-
-@app.on_event("startup")
 async def _prewarm_models():
     # Whisper-small is ~500MB; loading it on the first VAD pause makes turn 1
     # of a call sluggish vs every subsequent turn. Pull both ASR and TTS into
@@ -508,6 +738,63 @@ async def speak_stream(req: SpeakRequest, _=Depends(_require_auth)):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Mount FastRTC's WebRTC routes BEFORE the static catch-all below.
+#
+# Starlette resolves routes in registration order. `app.mount("/", StaticFiles)`
+# matches every path prefix, so any route registered AFTER it never gets a
+# look-in — and StaticFiles only supports GET, so POSTing to `/webrtc/offer`
+# would return 405 Method Not Allowed instead of being handled by FastRTC.
+#
+# The previous design deferred `_ensure_stream()` to the FastAPI `startup`
+# event "so fastrtc's heavy import doesn't slow /health". But the startup
+# event registers FastRTC's routes AFTER the static mount in this module —
+# wrong order. Eagerly building the Stream here at module-load fixes the
+# ordering. The fastrtc import cost is paid once at process boot, not on
+# every request, so the latency hit is at most a few hundred ms once.
+#
+# try/except so a missing fastrtc dep doesn't kill the whole service —
+# /transcribe + /speak still work for push-to-talk users.
+# ---------------------------------------------------------------------------
+try:
+    _ensure_stream()
+except Exception:
+    import traceback
+    traceback.print_exc()
+
+# ---------------------------------------------------------------------------
+# Static GUI — the "Voice Studio" page lives at `/`. Mounted LAST so all API
+# routes above (/health, /voices, /speak, /transcribe, /call/*, /webrtc/offer)
+# take routing precedence. `html=True` makes `/` serve `static/index.html`
+# automatically; any unknown sub-path under `/` falls through to a 404 from
+# StaticFiles (not from a Python handler), which is the desired behaviour.
+#
+# Skipped silently if the `static/` directory isn't present so a bare-bones
+# `python -m uvicorn server:app` for API-only debugging still works.
+# ---------------------------------------------------------------------------
+class _NoCacheStatics(StaticFiles):
+    """StaticFiles subclass that disables browser caching of the GUI assets.
+
+    Without this, browsers hold onto the previous `app.js` / `style.css` /
+    `index.html` aggressively — users see stale UI (empty paragraphs,
+    missing buttons, old behaviour) after a server-side change and need to
+    hard-refresh to pick up the new files. This is the same `_NoCacheStatics`
+    pattern MiniClosedAI uses (app.py:3306 there) — local dev tool, no
+    measurable cost at the bandwidth scale this service runs at.
+    """
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/", _NoCacheStatics(directory=str(_STATIC_DIR), html=True), name="static")
 
 
 if __name__ == "__main__":

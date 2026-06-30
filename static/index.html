@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice Studio · miniclosedai-voice</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="stylesheet" href="style.css" />
+  <!-- Apply saved theme BEFORE paint to avoid flash-of-wrong-theme.
+       Inline script intentionally — must run synchronously before any
+       stylesheet rule kicks in. Matches MiniClosedAI's boot pattern. -->
+  <script>
+    (function() {
+      try {
+        const saved = localStorage.getItem("miniclosedai-voice:theme") || "system";
+        const systemDark = matchMedia("(prefers-color-scheme: dark)").matches;
+        const useDark = saved === "dark" || (saved === "system" && systemDark);
+        if (useDark) document.documentElement.classList.add("dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-text">
+      <h1>Voice Studio</h1>
+      <p class="sub">Record a sample, clone the voice, use it from MiniClosedAI's TTS dropdown.</p>
+    </div>
+    <!-- Theme cycle: System → Light → Dark. Sun/moon/monitor icons; only
+         one is visible at a time (toggled by JS). Matches the pattern from
+         MiniClosedAI's main app so the two surfaces feel consistent. -->
+    <button id="theme-toggle" class="theme-toggle-btn" title="Theme: system" aria-label="Toggle theme">
+      <svg id="theme-icon-light" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      <svg id="theme-icon-dark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      <svg id="theme-icon-system" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+    </button>
+  </header>
+
+  <main class="container">
+    <!-- ============= Recorder + uploader ============= -->
+    <section class="card recorder">
+      <div class="read-prompt">
+        <div class="read-prompt-head">
+          <span class="read-prompt-label">Read this aloud (≈ 10 seconds):</span>
+          <div class="read-prompt-controls">
+            <div class="lang-toggle" role="group" aria-label="Script language">
+              <button id="read-prompt-lang-en" type="button" class="lang-toggle-btn active"
+                      data-lang="en" aria-pressed="true">EN</button>
+              <button id="read-prompt-lang-es" type="button" class="lang-toggle-btn"
+                      data-lang="es" aria-pressed="false">ES</button>
+            </div>
+            <button id="read-prompt-shuffle" type="button" class="read-prompt-shuffle"
+                    title="Try a different script" aria-label="Shuffle script">↻ New script</button>
+          </div>
+        </div>
+        <p id="read-prompt-text" class="read-prompt-text"></p>
+      </div>
+      <div class="recorder-row">
+        <button id="record-btn" type="button" class="btn btn-primary btn-record">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="record-btn-label">Start recording</span>
+        </button>
+        <span id="record-timer" class="timer" aria-live="polite">0:00</span>
+        <div id="level-meter" class="level-meter" aria-hidden="true"><div id="level-meter-bar"></div></div>
+      </div>
+      <div class="recorder-row">
+        <span class="or-sep" aria-hidden="true">or</span>
+        <button id="upload-btn" type="button" class="btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
+          Upload audio file
+        </button>
+        <input id="upload-input" type="file" accept="audio/wav,audio/mpeg,audio/mp4,audio/x-m4a,audio/ogg,audio/flac,audio/webm,audio/*" hidden />
+      </div>
+      <p class="hint">
+        Record live (mic required), or upload a 5–30 s audio clip
+        (WAV, MP3, M4A, OGG, FLAC). Aim for clean, natural speech with no
+        background noise — Chatterbox clones the speaker from a single sample.
+      </p>
+      <p id="record-error" class="error" hidden></p>
+    </section>
+
+    <!-- ============= Review + save (revealed after stop) ============= -->
+    <section id="save-card" class="card save" hidden>
+      <h2>Save this clone</h2>
+      <audio id="playback" controls preload="metadata"></audio>
+      <form id="save-form" class="save-form">
+        <label class="field">
+          <span>Name</span>
+          <input id="name-input" type="text" maxlength="60" required
+                 placeholder="e.g. Edgar's voice" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>Language</span>
+          <select id="lang-input">
+            <option value="en" selected>English</option>
+            <option value="es">Spanish</option>
+          </select>
+        </label>
+        <div class="save-actions">
+          <button id="discard-btn" type="button" class="btn btn-secondary">Discard</button>
+          <button id="save-btn" type="submit" class="btn btn-primary">Save voice</button>
+        </div>
+        <p id="save-error" class="error" hidden></p>
+      </form>
+    </section>
+
+    <!-- ============= Voices list ============= -->
+    <section class="card voices">
+      <div class="voices-head">
+        <h2>Voices</h2>
+        <button id="refresh-btn" type="button" class="btn btn-secondary" title="Reload catalog">Refresh</button>
+      </div>
+      <ul id="voices-list" class="voices-list" aria-live="polite"></ul>
+      <p id="voices-empty" class="hint" hidden>No voices yet. Record one above to get started.</p>
+    </section>
+
+    <!-- ============= Connect to MiniClosedAI ============= -->
+    <!-- Surfaces the base URL to register this voice service in MiniClosedAI,
+         mirroring the copy-able base_url miniclosedai-llm exposes for its
+         model servers. Cloned voices then show up in each bot's TTS dropdown. -->
+    <section class="card connect">
+      <h2>Connect to MiniClosedAI</h2>
+      <p class="hint connect-intro">
+        In MiniClosedAI, open <strong>Settings → Backends → Add endpoint</strong>,
+        choose <strong>Kind: voice</strong>, and paste this URL. Your cloned
+        voices then appear in every bot's TTS dropdown.
+      </p>
+      <div class="copy-box">
+        <span class="kind">Kind: <strong>voice</strong> · Base URL:</span>
+        <code id="connect-base-url">…</code>
+        <button id="connect-copy" class="btn btn-small act-copy" type="button">Copy</button>
+      </div>
+      <p class="hint alt-hint" id="connect-alt-hint" hidden>
+        Same-host Docker MiniClosedAI? Use <code id="connect-alt-base-url"></code> instead.
+      </p>
+      <p class="hint" id="connect-auth-hint" hidden>
+        This service requires an API key — set the same token as the endpoint's
+        <strong>API key</strong> in MiniClosedAI.
+      </p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

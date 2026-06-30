@@ -1,0 +1,468 @@
+/* Voice Studio — minimal CSS for the miniclosedai-voice GUI.
+   Tracks the same palette / radii / spacing rhythm as MiniClosedAI's main
+   app so the two surfaces feel like one product. */
+
+/* Light theme is the default — flips to dark when the <html> element has
+   .dark (set by the boot script in index.html based on saved preference
+   or, when in "system" mode, prefers-color-scheme). Class-based dark
+   mode beats the OS-only media query: the user can override their OS
+   via the theme toggle and the preference persists across visits. */
+:root {
+  --bg: #f6f7fa;
+  --panel: #ffffff;
+  --panel-hover: #eef0f5;
+  --border: #d8dce4;
+  --border-strong: #b3bbcb;
+  --text: #1a1d24;
+  --text-muted: #5b6473;
+  --accent: #5b8df9;
+  --accent-soft: rgba(91, 141, 249, 0.18);
+  --accent-ring: rgba(91, 141, 249, 0.45);
+  --danger: #e2725c;
+  --danger-soft: rgba(226, 114, 92, 0.15);
+  --ok: #4cba8a;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --shadow-md: 0 4px 16px rgba(15, 17, 21, 0.08);
+  --t-fast: 120ms ease;
+}
+:root.dark {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-hover: #1e222b;
+  --border: #262b35;
+  --border-strong: #3a4150;
+  --text: #e4e6ec;
+  --text-muted: #8a93a4;
+  --accent-soft: rgba(91, 141, 249, 0.15);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.45;
+  font-size: 14px;
+}
+
+/* ============ Layout ============ */
+.topbar {
+  padding: 24px 24px 8px;
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+.topbar-text { flex: 1 1 auto; min-width: 0; }
+.topbar h1 { margin: 0 0 4px; font-size: 24px; letter-spacing: -0.01em; }
+.topbar .sub { margin: 0; color: var(--text-muted); }
+
+/* Theme toggle — Sun / Moon / Monitor cycle button. Sits in the top-right
+   of the header. Hover lights it up subtly; only one of the three SVG
+   icons is visible at a time (toggled by JS). */
+.theme-toggle-btn {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.theme-toggle-btn:hover {
+  background: var(--panel-hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.theme-toggle-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.theme-toggle-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.container {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 16px 24px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 18px 18px 16px;
+  box-shadow: var(--shadow-md);
+}
+.card h2 { margin: 0 0 12px; font-size: 16px; letter-spacing: -0.005em; }
+.hint { margin: 8px 0 0; color: var(--text-muted); font-size: 12.5px; }
+.error {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-radius: var(--r-sm);
+  font-size: 13px;
+}
+
+/* ── Connect-to-MiniClosedAI card · copy-able base URL ───────────────────── */
+/* Mirrors the .copy-box pattern from miniclosedai-llm so the two surfaces
+   feel consistent: a bordered row with the URL and a Copy button. */
+.connect-intro { margin: 0 0 12px; }
+.copy-box {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+}
+.copy-box code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px; word-break: break-all; flex: 1 1 auto;
+}
+.copy-box .kind { color: var(--text-muted); font-size: 12px; }
+.alt-hint code, .connect code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.btn-small { padding: 4px 10px; font-size: 12px; }
+
+/* ============ Buttons ============ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast);
+}
+.btn:hover { background: var(--panel-hover); border-color: var(--border-strong); }
+.btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+.btn-primary:hover { background: #6f9eff; border-color: #6f9eff; }
+.btn-secondary { /* alias for default; semantic name */ }
+.btn-danger {
+  color: var(--danger);
+  border-color: var(--border);
+}
+.btn-danger:hover { background: var(--danger-soft); border-color: var(--danger); }
+
+/* ============ Read-aloud prompt (above the recorder rows) ============ */
+.read-prompt {
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+.read-prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.read-prompt-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* EN / ES segmented control — two-button language toggle */
+.lang-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.lang-toggle-btn {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--border-strong);
+  padding: 3px 9px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.lang-toggle-btn:last-child { border-right: 0; }
+.lang-toggle-btn:hover { color: var(--text); }
+.lang-toggle-btn.active {
+  background: var(--accent);
+  color: white;
+}
+.lang-toggle-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+  z-index: 1;
+}
+.read-prompt-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+.read-prompt-shuffle {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.read-prompt-shuffle:hover {
+  background: var(--bg);
+  border-color: var(--border-strong);
+}
+.read-prompt-shuffle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.read-prompt-text {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.5;
+  font-style: italic;
+  color: var(--text);
+}
+.read-prompt-text::before { content: "“"; margin-right: 2px; }
+.read-prompt-text::after  { content: "”"; margin-left: 2px; }
+
+/* ============ Recorder ============ */
+.recorder-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.recorder-row + .recorder-row { margin-top: 10px; }
+.or-sep {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.btn-record {
+  padding: 12px 18px;
+  font-size: 14px;
+}
+.btn-record .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: white;
+  display: inline-block;
+}
+/* During recording, the button stays primary but the dot pulses red. */
+.btn-record.is-recording {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+.btn-record.is-recording .dot {
+  background: white;
+  animation: rec-pulse 1s ease-in-out infinite;
+}
+@keyframes rec-pulse {
+  0%, 100% { transform: scale(1);   opacity: 1; }
+  50%      { transform: scale(1.3); opacity: 0.65; }
+}
+.timer {
+  font-feature-settings: "tnum";
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-muted);
+  min-width: 56px;
+}
+.timer.is-recording { color: var(--danger); }
+.level-meter {
+  flex: 1 1 120px;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  min-width: 100px;
+  opacity: 0.5;
+  transition: opacity var(--t-fast);
+}
+.level-meter.is-active { opacity: 1; }
+#level-meter-bar {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--ok), var(--accent), var(--danger));
+  transition: width 60ms linear;
+}
+@media (prefers-reduced-motion: reduce) {
+  .btn-record.is-recording .dot { animation: none; }
+}
+
+/* ============ Save form ============ */
+.save audio {
+  width: 100%;
+  display: block;
+  margin-bottom: 12px;
+}
+.save-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.field span {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.field input,
+.field select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.field input:focus-visible,
+.field select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.save-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+/* Spinner-in-button while saving. Matches the MiniClosedAI prompt-gen pattern. */
+.btn.is-busy {
+  position: relative;
+  color: transparent;
+  pointer-events: none;
+}
+.btn.is-busy::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  animation: btn-spin 0.8s linear infinite;
+}
+@keyframes btn-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .btn.is-busy::after { animation: none; }
+}
+
+/* ============ Voices list ============ */
+.voices-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.voices-head h2 { margin: 0; }
+.voices-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.voice-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.voice-row .name { font-weight: 500; flex: 1 1 auto; min-width: 0; }
+.voice-row .name .lang-pill {
+  margin-left: 6px;
+  padding: 2px 6px;
+  font-size: 11px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+.voice-row .name .builtin-pill {
+  background: var(--border);
+  color: var(--text-muted);
+}
+.voice-row .actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.voice-row .actions .btn { padding: 5px 10px; font-size: 12px; }
+
+/* ============ Toast ============ */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  font-size: 13px;
+  z-index: 1000;
+  animation: toast-in 200ms ease-out;
+}
+.toast.is-error { color: var(--danger); }
+.toast.is-ok    { color: var(--ok); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
