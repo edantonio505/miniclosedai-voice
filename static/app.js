@@ -68,6 +68,11 @@ const els = {
   readPromptLangEn:  document.getElementById("read-prompt-lang-en"),
   readPromptLangEs:  document.getElementById("read-prompt-lang-es"),
   saveCardLang:      document.getElementById("lang-input"),
+  connectBaseUrl:    document.getElementById("connect-base-url"),
+  connectCopy:       document.getElementById("connect-copy"),
+  connectAltHint:    document.getElementById("connect-alt-hint"),
+  connectAltBaseUrl: document.getElementById("connect-alt-base-url"),
+  connectAuthHint:   document.getElementById("connect-auth-hint"),
 };
 
 // Index of the script currently shown WITHIN the current language pool.
@@ -602,6 +607,37 @@ async function deleteVoice(v) {
   }
 }
 
+// ─────────────── Connect to MiniClosedAI ───────────────────────────────────
+// Fetches the base URL to register this voice service in MiniClosedAI and
+// renders it into the copy-box. Falls back to the page's own origin if the
+// /api/connect-info endpoint is unavailable (older server) so the Copy button
+// still hands the user something usable.
+async function loadConnectInfo() {
+  let info;
+  try {
+    const r = await fetch("/api/connect-info");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    info = await r.json();
+  } catch (_) {
+    // Older server without the endpoint: the URL the browser is on is, at
+    // worst, valid for a same-host MiniClosedAI.
+    info = { base_url: location.origin, alt_base_url: "", auth_required: false };
+  }
+  els.connectBaseUrl.textContent = info.base_url || location.origin;
+  if (info.alt_base_url) {
+    els.connectAltBaseUrl.textContent = info.alt_base_url;
+    els.connectAltHint.hidden = false;
+  }
+  els.connectAuthHint.hidden = !info.auth_required;
+}
+
+els && els.connectCopy && els.connectCopy.addEventListener("click", () => {
+  const url = els.connectBaseUrl.textContent;
+  navigator.clipboard.writeText(url).then(
+    () => toast("Copied base URL", "ok"),
+    () => toast("Copy failed — select and copy manually", "error"));
+});
+
 // ─────────────── Boot ──────────────────────────────────────────────────────
 function bind() {
   els.recordBtn.addEventListener("click", async () => {
@@ -709,3 +745,4 @@ try {
   setReadLang("en");
 }
 loadVoices();
+loadConnectInfo();

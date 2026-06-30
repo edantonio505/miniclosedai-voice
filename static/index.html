@@ -113,6 +113,31 @@
       <ul id="voices-list" class="voices-list" aria-live="polite"></ul>
       <p id="voices-empty" class="hint" hidden>No voices yet. Record one above to get started.</p>
     </section>
+
+    <!-- ============= Connect to MiniClosedAI ============= -->
+    <!-- Surfaces the base URL to register this voice service in MiniClosedAI,
+         mirroring the copy-able base_url miniclosedai-llm exposes for its
+         model servers. Cloned voices then show up in each bot's TTS dropdown. -->
+    <section class="card connect">
+      <h2>Connect to MiniClosedAI</h2>
+      <p class="hint connect-intro">
+        In MiniClosedAI, open <strong>Settings → Backends → Add endpoint</strong>,
+        choose <strong>Kind: voice</strong>, and paste this URL. Your cloned
+        voices then appear in every bot's TTS dropdown.
+      </p>
+      <div class="copy-box">
+        <span class="kind">Kind: <strong>voice</strong> · Base URL:</span>
+        <code id="connect-base-url">…</code>
+        <button id="connect-copy" class="btn btn-small act-copy" type="button">Copy</button>
+      </div>
+      <p class="hint alt-hint" id="connect-alt-hint" hidden>
+        Same-host Docker MiniClosedAI? Use <code id="connect-alt-base-url"></code> instead.
+      </p>
+      <p class="hint" id="connect-auth-hint" hidden>
+        This service requires an API key — set the same token as the endpoint's
+        <strong>API key</strong> in MiniClosedAI.
+      </p>
+    </section>
   </main>
 
   <div id="toast" class="toast" hidden aria-live="polite"></div>

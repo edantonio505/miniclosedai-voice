@@ -119,6 +119,26 @@ body {
   font-size: 13px;
 }
 
+/* ── Connect-to-MiniClosedAI card · copy-able base URL ───────────────────── */
+/* Mirrors the .copy-box pattern from miniclosedai-llm so the two surfaces
+   feel consistent: a bordered row with the URL and a Copy button. */
+.connect-intro { margin: 0 0 12px; }
+.copy-box {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+}
+.copy-box code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px; word-break: break-all; flex: 1 1 auto;
+}
+.copy-box .kind { color: var(--text-muted); font-size: 12px; }
+.alt-hint code, .connect code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.btn-small { padding: 4px 10px; font-size: 12px; }
+
 /* ============ Buttons ============ */
 .btn {
   display: inline-flex;

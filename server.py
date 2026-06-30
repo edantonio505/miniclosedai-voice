@@ -23,6 +23,7 @@ import io
 import json
 import logging
 import os
+import socket
 from pathlib import Path
 
 # WebRTC debugging — surface ICE state changes, peer connection lifecycle,
@@ -38,7 +39,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 import soundfile as sf
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -135,6 +136,59 @@ def health():
         "tts_model": "chatterbox-turbo",
         "device": DEVICE,
         "voices_loaded": _tts is not None,
+    }
+
+
+def _lan_ip() -> str:
+    """Best-effort primary LAN IP of this host (e.g. 192.168.0.110).
+
+    Opens a throwaway UDP socket toward a public address so the kernel picks
+    the interface it would actually route through, then reads back the local
+    side. No packet is sent. Returns "" if it can't be determined (no network),
+    so the caller can fall back to localhost.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return ""
+
+
+@app.get("/api/connect-info")
+def connect_info(request: Request):
+    """The base URL to paste into MiniClosedAI (Settings → Add endpoint,
+    Kind: voice). Mirrors the copy-able base_url miniclosedai-llm exposes for
+    its model servers, but for this whole voice service rather than per-model.
+
+    - base_url:     reachable from another machine on the LAN (or this host).
+                    Scheme is whatever the GUI is being served over (https
+                    behind the dev cert, http with --http); host is the LAN IP
+                    so a miniclosedai running elsewhere can reach back, with
+                    VOICE_PUBLIC_HOST / RUNPOD_POD_ID overrides for hosted pods.
+    - alt_base_url: for a miniclosedai running as a Docker container on THIS
+                    same host — it reaches the service via the host gateway.
+    """
+    scheme = request.url.scheme  # 'https' behind the dev cert, 'http' with --http
+    host_override = (
+        os.environ.get("VOICE_PUBLIC_HOST")
+        or os.environ.get("PUBLIC_HOST")
+        or os.environ.get("ADVERTISE_HOST")
+    )
+    pod = os.environ.get("RUNPOD_POD_ID")
+    if pod and not host_override:
+        base_url = f"https://{pod}-{PORT}.proxy.runpod.net"
+    else:
+        host = host_override or _lan_ip() or "localhost"
+        base_url = f"{scheme}://{host}:{PORT}"
+    return {
+        "kind": "voice",
+        "base_url": base_url,
+        "alt_base_url": f"http://host.docker.internal:{PORT}",
+        "auth_required": bool(API_KEY),
     }
 
 
