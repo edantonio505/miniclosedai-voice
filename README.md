@@ -346,9 +346,11 @@ calls `/api/voices` (which proxies through to this service) your clone
 shows up in the dropdown.
 
 The Studio also lists every existing voice with a **▶ Sample** button
-(synthesizes a short greeting so you can audition it) and a **Delete**
-button for clones. The built-in `default` voice can't be deleted — it's
-the fallback that keeps the service usable when nothing else is registered.
+(synthesizes a short greeting so you can audition it), a **Test…** button
+(opens an inline text box — type any text, press **▶ Play** or ⌘/Ctrl-Enter,
+and hear that voice speak it), and a **Delete** button for clones. The built-in
+`default` voice can't be deleted — it's the fallback that keeps the service
+usable when nothing else is registered.
 
 ### Endpoints powering the Studio
 

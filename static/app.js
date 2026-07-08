@@ -556,6 +556,61 @@ function renderVoiceRow(v) {
   playBtn.addEventListener("click", () => playSample(v, playBtn));
   actions.appendChild(playBtn);
 
+  // Custom-text tester: a full-width accordion panel that stays collapsed until
+  // "Test…" is clicked, then animates open to reveal a textarea + Play so the
+  // user can hear this voice say anything. Uses the grid-template-rows 0fr→1fr
+  // technique so it animates to the content's natural height with no JS measuring.
+  const tester = document.createElement("div");
+  tester.className = "voice-tester";              // collapsed by default (no .is-open)
+  const testerInner = document.createElement("div");
+  testerInner.className = "voice-tester-inner";   // overflow clip during the animation
+  const testerBody = document.createElement("div");
+  testerBody.className = "voice-tester-body";      // padding/border live here, hidden when collapsed
+
+  const ta = document.createElement("textarea");
+  ta.className = "voice-tester-input";
+  ta.rows = 2;
+  ta.maxLength = 4000;   // matches server /speak text max_length
+  ta.placeholder = "Type text to hear in this voice…";
+  ta.value = "The quick brown fox jumps over the lazy dog.";
+
+  const testerActions = document.createElement("div");
+  testerActions.className = "voice-tester-actions";
+  const speakBtn = document.createElement("button");
+  speakBtn.type = "button";
+  speakBtn.className = "btn btn-primary btn-small";
+  speakBtn.textContent = "▶ Play";
+  speakBtn.title = "Synthesize the text above in this voice";
+  speakBtn.addEventListener("click", () => synthAndPlay(v, ta.value, speakBtn));
+  testerActions.appendChild(speakBtn);
+
+  // Cmd/Ctrl+Enter in the textarea triggers Play — quick keyboard path.
+  ta.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      synthAndPlay(v, ta.value, speakBtn);
+    }
+  });
+
+  testerBody.appendChild(ta);
+  testerBody.appendChild(testerActions);
+  testerInner.appendChild(testerBody);
+  tester.appendChild(testerInner);
+
+  const testBtn = document.createElement("button");
+  testBtn.type = "button";
+  testBtn.className = "btn";
+  testBtn.textContent = "Test…";
+  testBtn.title = "Type custom text and hear it in this voice";
+  testBtn.setAttribute("aria-expanded", "false");
+  testBtn.addEventListener("click", () => {
+    const open = tester.classList.toggle("is-open");
+    testBtn.setAttribute("aria-expanded", String(open));
+    testBtn.classList.toggle("is-active", open);
+    if (open) ta.focus();
+  });
+  actions.appendChild(testBtn);
+
   if (v.id !== "default") {
     const del = document.createElement("button");
     del.type = "button";
@@ -567,10 +622,18 @@ function renderVoiceRow(v) {
 
   li.appendChild(name);
   li.appendChild(actions);
+  li.appendChild(tester);
   return li;
 }
 
-async function playSample(v, btn) {
+// Synthesize `text` in voice `v` and play it back. Shared by the fixed-greeting
+// "Sample" button and the custom-text "Test" panel. `btn` gets a busy state.
+async function synthAndPlay(v, text, btn) {
+  const clean = (text || "").trim();
+  if (!clean) {
+    toast("Enter some text to speak.", "error");
+    return;
+  }
   btn.disabled = true;
   const origLabel = btn.textContent;
   btn.textContent = "Synthesizing…";
@@ -579,7 +642,7 @@ async function playSample(v, btn) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        text: SAMPLE_GREETING,
+        text: clean,
         voice: v.id,
         language: v.language || "en",
       }),
@@ -594,11 +657,15 @@ async function playSample(v, btn) {
     audio.onended = () => URL.revokeObjectURL(url);
     await audio.play();
   } catch (e) {
-    toast(`Sample failed: ${e.message || e}`, "error");
+    toast(`Speak failed: ${e.message || e}`, "error");
   } finally {
     btn.disabled = false;
     btn.textContent = origLabel;
   }
+}
+
+function playSample(v, btn) {
+  return synthAndPlay(v, SAMPLE_GREETING, btn);
 }
 
 async function deleteVoice(v) {

@@ -415,6 +415,7 @@ body {
 .voice-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;              /* let the tester panel drop to its own line */
   gap: 10px;
   padding: 10px 12px;
   background: var(--bg);
@@ -444,6 +445,56 @@ body {
   flex-shrink: 0;
 }
 .voice-row .actions .btn { padding: 5px 10px; font-size: 12px; }
+.voice-row .actions .btn.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Custom-text tester — full-width accordion row under the voice's actions.
+   Collapsed by default; the grid-template-rows 0fr→1fr trick animates to the
+   content's natural height without measuring it in JS. */
+.voice-tester {
+  flex: 1 1 100%;
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 220ms ease;
+}
+.voice-tester.is-open { grid-template-rows: 1fr; }
+.voice-tester-inner {
+  overflow: hidden;      /* clips the body while it animates in/out */
+  min-height: 0;         /* required for the grid row to actually collapse to 0 */
+}
+.voice-tester-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.voice-tester-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 44px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.voice-tester-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.voice-tester-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
 
 /* ============ Toast ============ */
 .toast {
