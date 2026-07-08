@@ -218,13 +218,17 @@ def voices(_=Depends(_require_auth)):
 # its next invocation — no restart, no in-memory catalog to invalidate.
 
 # 0.5 s minimum: anything shorter is almost certainly an accidental tap and
-# would give Chatterbox no useful speaker conditioning. 35 s ceiling: the UI
-# hard-caps at 30 s; a few seconds of slack tolerates browser timing jitter.
+# would give Chatterbox no useful speaker conditioning. Long clips are NOT
+# rejected — we auto-trim to the first _VOICE_MAX_DURATION_SEC seconds. Chatterbox
+# only conditions on the leading slice of the reference (its own docs recommend
+# 5-15 s), so the tail is wasted anyway; trimming beats making the user go
+# hand-edit their file.
 _VOICE_MIN_DURATION_SEC = 0.5
-_VOICE_MAX_DURATION_SEC = 35.0
-# Cap upload size (~5 MB at 22 kHz mono int16 ≈ 113 s of audio) so a runaway
-# client can't DoS the disk. Generous vs the 30 s recording cap.
-_VOICE_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+_VOICE_MAX_DURATION_SEC = 90.0   # trim cap, not a reject threshold
+# Cap upload size so a runaway client can't DoS the disk. 20 MB comfortably fits
+# a 90 s clip even at 96 kHz mono int16 (~17 MB); anything past that is a client
+# bug or abuse, not a legitimate voice sample.
+_VOICE_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 # Reserved id — the fallback voice every install ships with. Refused as a
 # slug so a user can't clobber it via the GUI by naming a clone "default".
 _RESERVED_VOICE_IDS = {"default"}
@@ -295,8 +299,13 @@ async def upload_voice(
     duration_sec = data.shape[0] / float(sample_rate or 1)
     if duration_sec < _VOICE_MIN_DURATION_SEC:
         raise HTTPException(400, f"Recording too short ({duration_sec:.2f} s; min {_VOICE_MIN_DURATION_SEC} s).")
+    # Auto-trim (don't reject) anything over the cap to the leading window.
     if duration_sec > _VOICE_MAX_DURATION_SEC:
-        raise HTTPException(400, f"Recording too long ({duration_sec:.2f} s; max {_VOICE_MAX_DURATION_SEC} s).")
+        max_samples = int(_VOICE_MAX_DURATION_SEC * sample_rate)
+        data = data[:max_samples]
+        logging.getLogger("voice.upload").info(
+            "upload %.1f s → trimmed to %.1f s", duration_sec, _VOICE_MAX_DURATION_SEC)
+        duration_sec = data.shape[0] / float(sample_rate or 1)
 
     # Downmix to mono if needed, then resample to 24000 Hz with librosa —
     # the SAME resampler chatterbox's `prepare_conditionals` uses internally

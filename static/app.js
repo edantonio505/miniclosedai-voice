@@ -8,6 +8,10 @@
  */
 
 const MAX_RECORD_SECONDS = 30;
+// Uploaded clips longer than this are auto-trimmed (not rejected) to the leading
+// window before encoding — Chatterbox only conditions on the start of the
+// reference, so the tail is wasted. Keep in sync with server _VOICE_MAX_DURATION_SEC.
+const MAX_UPLOAD_SECONDS = 90;
 // Sample rate hint — but the encoder NO LONGER resamples in the browser.
 // We send WAVs at whatever rate AudioContext captured at (typically 48 kHz)
 // and let the server handle resampling to 24 kHz with librosa's polyphase
@@ -364,10 +368,11 @@ async function loadAudioFile(file) {
     setError(els.recordError, `Not a recognised audio file: ${file.name}`);
     return;
   }
-  // Cap upload size to match the recording cap (5 MB ≈ 113 s at 22 kHz mono).
-  // Most 30 s clips in any of the supported formats are well under this.
-  if (file.size > 10 * 1024 * 1024) {
-    setError(els.recordError, `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB; max 10 MB).`);
+  // Cap the SOURCE file size. We auto-trim long clips after decode, but still
+  // guard the raw upload so a giant file can't blow up decodeAudioData. 40 MB
+  // holds several minutes of compressed audio (we only keep the first 90 s).
+  if (file.size > 40 * 1024 * 1024) {
+    setError(els.recordError, `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB; max 40 MB).`);
     return;
   }
 
@@ -386,27 +391,27 @@ async function loadAudioFile(file) {
     return;
   }
 
-  // Validate duration against the same window the recording flow enforces, so
-  // both entry paths converge on identical server-side semantics. The server's
-  // ceiling is 35 s; we tighten to 30 s here so the user gets a clear UI hint
-  // before the server can complain.
+  // Only the lower bound is a hard error — too-short clips give Chatterbox no
+  // usable conditioning. Too-long clips are fine: we auto-trim to the first
+  // MAX_UPLOAD_SECONDS (matching the server) instead of making the user go
+  // hand-edit their file.
   const duration = audioBuffer.duration;
   if (duration < 0.5) {
     setError(els.recordError, `Audio is only ${duration.toFixed(2)} s — at least 0.5 s required.`);
     return;
   }
-  if (duration > MAX_RECORD_SECONDS) {
-    setError(els.recordError, `Audio is ${duration.toFixed(1)} s — trim it to ${MAX_RECORD_SECONDS} s or less.`);
-    return;
-  }
+  const willTrim = duration > MAX_UPLOAD_SECONDS;
 
   // Downmix multi-channel sources to mono by averaging channels. Mono is what
   // Chatterbox actually conditions on; stereo just doubles the file size.
-  const n = audioBuffer.length;
+  // Trim to the first MAX_UPLOAD_SECONDS while we're here so oversized uploads
+  // never leave the browser.
+  const maxSamples = Math.floor(MAX_UPLOAD_SECONDS * audioBuffer.sampleRate);
+  const n = Math.min(audioBuffer.length, maxSamples);
   const channels = audioBuffer.numberOfChannels;
   const mono = new Float32Array(n);
   if (channels === 1) {
-    mono.set(audioBuffer.getChannelData(0));
+    mono.set(audioBuffer.getChannelData(0).subarray(0, n));
   } else {
     const cs = [];
     for (let i = 0; i < channels; i++) cs.push(audioBuffer.getChannelData(i));
@@ -415,6 +420,10 @@ async function loadAudioFile(file) {
       for (let c = 0; c < channels; c++) sum += cs[c][i];
       mono[i] = sum / channels;
     }
+  }
+
+  if (willTrim) {
+    toast(`Audio was ${duration.toFixed(1)} s — trimmed to the first ${MAX_UPLOAD_SECONDS} s.`, "warn");
   }
 
   // Reuse the recorder's encoder so the wire format is byte-identical.

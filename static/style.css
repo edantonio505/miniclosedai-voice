@@ -462,6 +462,7 @@ body {
 }
 .toast.is-error { color: var(--danger); }
 .toast.is-ok    { color: var(--ok); }
+.toast.is-warn  { color: var(--accent); }
 @keyframes toast-in {
   from { opacity: 0; transform: translate(-50%, 8px); }
   to   { opacity: 1; transform: translate(-50%, 0); }

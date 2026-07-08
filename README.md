@@ -108,7 +108,10 @@ Re-running is safe. The script:
 4. Installs the rest of `requirements.txt`.
 5. Patches `df/io.py` to work with torchaudio 2.10+ (one-line stub for
    `AudioMetaData`, which was removed upstream).
-6. Verifies imports + GPU access.
+6. Patches `chatterbox/tts_turbo.py` so it downloads the (public) TTS weights
+   anonymously instead of demanding a Hugging Face login — otherwise the first
+   `/speak` 500s on any box without `hf auth login`.
+7. Verifies imports + GPU access.
 
 ### `start.sh` — boot the service
 
@@ -468,6 +471,7 @@ your mic is already loud — leave gain at 1.
 |---|---|---|
 | RunPod `proxy.runpod.net` URL hangs / won't load, but `/health` works on the pod | service is speaking HTTPS; the RunPod proxy needs a plain-HTTP backend | Now auto-handled — `start.sh` detects `RUNPOD_POD_ID` and serves HTTP. If you forced `--https`, drop it (or run `./start.sh --http`). Also confirm port 8090 is **exposed as HTTP** in the pod settings. |
 | `torch.cuda.is_available()` is `False`; log says *"NVIDIA driver on your system is too old"* | `setup.sh` picked a CUDA wheel newer than the pod's driver | Read `CUDA Version:` in `nvidia-smi`, re-run `./setup.sh --cuda <that version>` (e.g. `--cuda 12.8`), then `./start.sh -d`. |
+| `/speak` (e.g. the GUI **Sample** button) returns `500`; log shows `LocalTokenNotFoundError: Token is required (token=True)` | chatterbox-tts 0.1.6 hardcodes `snapshot_download(token=... or True)`, forcing a HF login even though the model repo is public | `setup.sh` now patches `tts_turbo.py` to download anonymously — re-run `./setup.sh`, then `./start.sh -d`. No Hugging Face account or token needed. |
 | `chatterbox.tts ImportError: PerthImplicitWatermarker is None` | `pkg_resources` missing (setuptools 81+) | `pip install 'setuptools<81'` (already in requirements.txt) |
 | `df.enhance ImportError: cannot import 'AudioMetaData' from 'torchaudio'` | DeepFilterNet 0.5.6 expects torchaudio<2.10 API | `setup.sh` patches `df/io.py` automatically. Run it again. |
 | Whisper warns `compute capability 12.1 not supported` | torch 2.10 doesn't have native sm_121 (Blackwell) kernels | PTX-JIT fallback works fine; ignore the warning |

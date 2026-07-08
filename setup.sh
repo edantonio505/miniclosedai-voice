@@ -137,6 +137,24 @@ if [[ -n "$DF_IO" && -f "$DF_IO" ]]; then
   fi
 fi
 
+# ─── 7b. Patch Chatterbox Turbo's Hugging Face token default ──────────────
+# chatterbox-tts 0.1.6 calls snapshot_download(token=os.getenv("HF_TOKEN") or True).
+# When HF_TOKEN is unset, `token=True` FORCES huggingface_hub to look up a locally
+# stored token and raises LocalTokenNotFoundError instead of downloading — even
+# though ResembleAI/chatterbox-turbo is a PUBLIC repo. That makes the very first
+# /speak (e.g. the GUI's "Sample" button) 500 on any box without `hf auth login`.
+# Swap the `or True` fallback to `or None`: huggingface_hub then uses a cached
+# token if one exists, else downloads anonymously — which is all a public repo
+# needs. No token, no login, no HF account required.
+TURBO=$(find "$VENV_DIR" -path "*/chatterbox/tts_turbo.py" -not -path "*/__pycache__/*" 2>/dev/null | head -1)
+if [[ -n "$TURBO" && -f "$TURBO" ]]; then
+  if grep -q 'token=os.getenv("HF_TOKEN") or True' "$TURBO" 2>/dev/null; then
+    step "Patching Chatterbox Turbo's HF token default (anonymous download)"
+    sed -i 's|token=os.getenv("HF_TOKEN") or True|token=os.getenv("HF_TOKEN") or None|' "$TURBO"
+    ok "Chatterbox Turbo patched at $TURBO"
+  fi
+fi
+
 # ─── 8. Sanity check ─────────────────────────────────────────────────────
 step "Verifying imports + GPU access"
 python - <<'PY'
