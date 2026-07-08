@@ -352,6 +352,12 @@ and hear that voice speak it), and a **Delete** button for clones. The built-in
 `default` voice can't be deleted — it's the fallback that keeps the service
 usable when nothing else is registered.
 
+The **Connect to MiniClosedAI** card also has a **📋 Copy integration prompt**
+button. It opens a popup with an auto-generated, copy-ready markdown prompt —
+templated with this instance's live base URL, whether an API key is required,
+and the real voice ids — that you paste into an AI coding tool (Cursor, etc.) to
+have it wire up `/speak` and `/speak/stream` TTS in your own app.
+
 ### Endpoints powering the Studio
 
 The page is a thin client over three HTTP endpoints; you can drive them

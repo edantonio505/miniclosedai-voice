@@ -77,7 +77,18 @@ const els = {
   connectAltHint:    document.getElementById("connect-alt-hint"),
   connectAltBaseUrl: document.getElementById("connect-alt-base-url"),
   connectAuthHint:   document.getElementById("connect-auth-hint"),
+  connectPromptBtn:  document.getElementById("connect-prompt-btn"),
+  promptModal:       document.getElementById("prompt-modal"),
+  promptMd:          document.getElementById("prompt-md"),
+  promptCopy:        document.getElementById("prompt-copy"),
+  promptClose:       document.getElementById("prompt-close"),
 };
+
+// Cached live data for the integration-prompt generator, so it can template the
+// doc with the real base URL, auth requirement, and voice ids without a second
+// network round-trip. Populated by loadConnectInfo() / loadVoices().
+let _connectInfo = null;   // { base_url, alt_base_url, auth_required }
+let _voiceCatalog = null;  // raw /voices response: { lang: [{id,name,gender?}] }
 
 // Index of the script currently shown WITHIN the current language pool.
 // `setReadPrompt(undefined)` picks a different one at random so the shuffle
@@ -504,6 +515,7 @@ async function loadVoices() {
     const r = await fetch("/voices");
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     catalog = await r.json();
+    _voiceCatalog = catalog;   // cache for the integration-prompt generator
   } catch (e) {
     toast(`Couldn't load voices: ${e.message || e}`, "error");
     return;
@@ -699,6 +711,7 @@ async function loadConnectInfo() {
     // worst, valid for a same-host MiniClosedAI.
     info = { base_url: location.origin, alt_base_url: "", auth_required: false };
   }
+  _connectInfo = info;   // cache for the integration-prompt generator
   els.connectBaseUrl.textContent = info.base_url || location.origin;
   if (info.alt_base_url) {
     els.connectAltBaseUrl.textContent = info.alt_base_url;
@@ -712,6 +725,209 @@ els && els.connectCopy && els.connectCopy.addEventListener("click", () => {
   navigator.clipboard.writeText(url).then(
     () => toast("Copied base URL", "ok"),
     () => toast("Copy failed — select and copy manually", "error"));
+});
+
+// ─────────────── Integration-prompt modal ──────────────────────────────────
+// Builds an "AI implementation prompt" (markdown) for wiring up TTS against this
+// service, templated with the live base URL, auth requirement, and real voice
+// ids from the caches. Safe to call before the caches populate — falls back to
+// location.origin, no-auth, and the "default" voice.
+function buildIntegrationPrompt() {
+  const info = _connectInfo || {};
+  const baseUrl = (info.base_url || location.origin).replace(/\/+$/, "");
+  const authRequired = !!info.auth_required;
+
+  // Real voice ids from the cached catalog, deduped across languages.
+  const ids = [];
+  if (_voiceCatalog) {
+    for (const lang of Object.keys(_voiceCatalog)) {
+      for (const v of (_voiceCatalog[lang] || [])) {
+        if (v && v.id && !ids.includes(v.id)) ids.push(v.id);
+      }
+    }
+  }
+  if (!ids.includes("default")) ids.unshift("default");
+  const exampleVoice = ids.includes("default") ? "default" : (ids[0] || "default");
+  const voiceList = ids.map((id) => `- \`${id}\``).join("\n");
+
+  // Auth fragments — only emitted when the service requires a key.
+  const authHeaderCurl = authRequired
+    ? `  -H "Authorization: Bearer <YOUR_API_KEY>" \\\n` : "";
+  const authHeaderJs = authRequired
+    ? `      "Authorization": "Bearer <YOUR_API_KEY>",\n` : "";
+  const authSection = authRequired
+    ? `## Auth
+This service requires an API key. Send it on **every** request:
+
+\`\`\`
+Authorization: Bearer <YOUR_API_KEY>
+\`\`\`
+
+Store \`<YOUR_API_KEY>\` as a secret / environment variable — never hard-code it.
+`
+    : `## Auth
+This service currently requires **no authentication**. If you later enable an API
+key, add \`Authorization: Bearer <YOUR_API_KEY>\` to every request.
+`;
+
+  return `# Add text-to-speech (TTS) to my app
+
+You are a coding assistant adding **text-to-speech** to my app. Implement a
+client for the HTTP API described below. The examples are curl + JavaScript
+\`fetch\`, but implement it idiomatically in whatever stack my project already
+uses. Do not invent endpoints or fields — use exactly what is documented here.
+
+## Service
+- Base URL: \`${baseUrl}\`
+- Audio format: PCM16, **mono**, **22050 Hz**.
+- Synthesis: \`POST /speak\` (one-shot WAV) and \`POST /speak/stream\`
+  (low-latency SSE streaming). Discover voices with \`GET /voices\`.
+
+${authSection}
+## Available voices
+Fetch these at runtime from \`GET /voices\`; ids available right now:
+${voiceList}
+
+The \`default\` voice always exists — use it as a fallback.
+
+## GET /voices — list voices
+Returns voices grouped by language code:
+
+\`\`\`json
+{ "en": [ { "id": "default", "name": "Default voice", "gender": "F" } ],
+  "es": [ { "id": "default", "name": "Default voice" } ] }
+\`\`\`
+
+\`\`\`bash
+curl ${baseUrl}/voices${authRequired ? ` \\\n  -H "Authorization: Bearer <YOUR_API_KEY>"` : ""}
+\`\`\`
+
+## POST /speak — one-shot synthesis (returns a WAV file)
+Request JSON body:
+
+| field    | type   | required | notes |
+|----------|--------|----------|-------|
+| text     | string | yes      | 1–4000 characters |
+| voice    | string | yes      | a voice id from /voices |
+| language | string | yes      | e.g. "en" or "es" |
+| speed    | float  | no       | 0.5–2.0, default 1.0 |
+
+Any **extra/unknown field is rejected with HTTP 422** — send only these keys.
+The response is raw \`audio/wav\` bytes (PCM16 mono @ 22050 Hz).
+
+\`\`\`bash
+curl -X POST ${baseUrl}/speak \\
+${authHeaderCurl}  -H "Content-Type: application/json" \\
+  -d '{"text":"Hello from my app!","voice":"${exampleVoice}","language":"en"}' \\
+  --output speech.wav
+\`\`\`
+
+\`\`\`js
+async function speak(text) {
+  const res = await fetch("${baseUrl}/speak", {
+    method: "POST",
+    headers: {
+${authHeaderJs}      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text,
+      voice: "${exampleVoice}",
+      language: "en",
+      // speed: 1.0, // optional, 0.5–2.0
+    }),
+  });
+  if (!res.ok) throw new Error("TTS failed: HTTP " + res.status);
+  const wavBlob = await res.blob();            // audio/wav
+  const url = URL.createObjectURL(wavBlob);
+  const audio = new Audio(url);
+  audio.onended = () => URL.revokeObjectURL(url);
+  await audio.play();
+}
+\`\`\`
+
+## POST /speak/stream — streaming synthesis (Server-Sent Events)
+Same JSON body as /speak, but the response is \`text/event-stream\`. Use it for
+low-latency playback: start playing before the whole clip is synthesized.
+
+Each frame is a \`data:\` line with JSON:
+- Audio frame: \`{"chunk_b64":"<base64 int16 LE PCM mono>","sample_rate":22050}\`
+- Completion:  \`{"done":true}\`
+- Error:       \`{"error":"<message>"}\`  (a single frame; stop and surface it)
+
+\`chunk_b64\` decodes to **raw little-endian int16 PCM samples** — mono, 22050 Hz,
+**no WAV header**. Convert to Float32 in [-1, 1] to feed the Web Audio API (or
+write a WAV header yourself if you need a file).
+
+\`\`\`bash
+curl -N -X POST ${baseUrl}/speak/stream \\
+${authHeaderCurl}  -H "Content-Type: application/json" \\
+  -d '{"text":"Streaming hello!","voice":"${exampleVoice}","language":"en"}'
+\`\`\`
+
+\`\`\`js
+async function speakStream(text, onPcm) {
+  const res = await fetch("${baseUrl}/speak/stream", {
+    method: "POST",
+    headers: {
+${authHeaderJs}      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ text, voice: "${exampleVoice}", language: "en" }),
+  });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const frames = buf.split("\\n\\n");
+    buf = frames.pop();                  // keep the trailing partial frame
+    for (const frame of frames) {
+      const line = frame.split("\\n").find((l) => l.startsWith("data:"));
+      if (!line) continue;
+      const msg = JSON.parse(line.slice(5).trim());
+      if (msg.error) throw new Error(msg.error);
+      if (msg.done) return;
+      // base64 -> int16 PCM -> Float32 [-1, 1]
+      const bytes = Uint8Array.from(atob(msg.chunk_b64), (c) => c.charCodeAt(0));
+      const pcm16 = new Int16Array(bytes.buffer);
+      const f32 = Float32Array.from(pcm16, (s) => s / 32768);
+      onPcm(f32, msg.sample_rate);       // e.g. schedule into an AudioContext
+    }
+  }
+}
+\`\`\`
+
+## Requirements for your implementation
+1. Add a reusable \`speak(text, voice?, language?)\` function plus a streaming
+   variant for long text.
+2. Load available voices from \`GET /voices\`; default to the \`default\` voice.
+3. Handle errors: non-2xx from /speak, and \`{"error":...}\` frames from the
+   stream. Surface a user-visible message; never fail silently.
+4. Keep the base URL${authRequired ? " and API key" : ""} in configuration, not hard-coded in call sites.
+`;
+}
+
+let _prevFocus = null;   // element to restore focus to when the modal closes
+
+function openPromptModal() {
+  els.promptMd.textContent = buildIntegrationPrompt();   // textContent = literal, XSS-safe
+  _prevFocus = document.activeElement;
+  els.promptModal.hidden = false;
+  els.promptCopy.focus();          // land focus on the primary action
+}
+
+function closePromptModal() {
+  if (els.promptModal.hidden) return;
+  els.promptModal.hidden = true;
+  if (_prevFocus && document.contains(_prevFocus)) _prevFocus.focus();
+  _prevFocus = null;
+}
+
+els && els.promptCopy && els.promptCopy.addEventListener("click", () => {
+  navigator.clipboard.writeText(els.promptMd.textContent).then(
+    () => toast("Copied integration prompt", "ok"),
+    () => toast("Copy failed — select the text and copy manually", "error"));
 });
 
 // ─────────────── Boot ──────────────────────────────────────────────────────
@@ -742,9 +958,17 @@ function bind() {
   }
   if (els.readPromptLangEn) els.readPromptLangEn.addEventListener("click", () => setReadLang("en"));
   if (els.readPromptLangEs) els.readPromptLangEs.addEventListener("click", () => setReadLang("es"));
-  // Esc cancels recording / discards save-card.
+  // Integration-prompt modal: open from the connect card, close via the X or a
+  // click on the dimmed backdrop (but not the dialog itself).
+  els.connectPromptBtn && els.connectPromptBtn.addEventListener("click", openPromptModal);
+  els.promptClose && els.promptClose.addEventListener("click", closePromptModal);
+  els.promptModal && els.promptModal.addEventListener("click", (e) => {
+    if (e.target === els.promptModal) closePromptModal();
+  });
+  // Esc closes the modal first, else cancels recording / discards save-card.
   window.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    if (!els.promptModal.hidden) { closePromptModal(); return; }
     if (recorder.ctx) stopRecording().catch(() => {});
     else if (!els.saveCard.hidden) discardRecording();
   });

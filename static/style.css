@@ -518,3 +518,95 @@ body {
   from { opacity: 0; transform: translate(-50%, 8px); }
   to   { opacity: 1; transform: translate(-50%, 0); }
 }
+
+/* ============ Integration-prompt modal ============ */
+/* Built from scratch — full-screen dimmed overlay + centered dialog. Sits BELOW
+   the toast (z-index 900 < toast's 1000) so the "Copied" toast stays visible
+   over the open modal. All colors via theme vars, so it flips light/dark. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 17, 21, 0.55);
+  animation: modal-fade var(--t-fast);
+}
+/* `display:grid` above overrides the UA `[hidden]{display:none}` (author styles
+   win at equal specificity), so restore hiding explicitly — else the empty
+   overlay sits over the page and swallows the click that would fill it. */
+.modal-overlay[hidden] { display: none; }
+.modal-dialog {
+  width: 100%;
+  max-width: 680px;
+  max-height: min(80vh, 720px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  padding: 16px 18px 18px;
+  animation: modal-pop 160ms ease-out;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.modal-head h2 { margin: 0; font-size: 16px; letter-spacing: -0.005em; }
+.modal-head-actions { display: flex; gap: 6px; }
+.modal-sub { margin: 6px 0 10px; }
+
+/* Square icon-only buttons (copy / close) — mirrors .theme-toggle-btn. */
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.icon-btn:hover {
+  background: var(--panel-hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.icon-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+/* Scrollable raw-markdown block — the only growing/scrolling child so the
+   header + subtitle stay pinned while the markdown scrolls. */
+.modal-pre {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-overflow-scrolling: touch;
+}
+.modal-pre:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+@keyframes modal-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .modal-overlay, .modal-dialog { animation: none; }
+}
