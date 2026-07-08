@@ -44,14 +44,46 @@ fast (~10 s to `/health` ready, instant on subsequent boots).
 
 ## RunPod / cloud GPU template
 
-1. Pick any RunPod (or other cloud) template with NVIDIA driver pre-installed.
-2. Open a web terminal on the pod.
-3. ```bash
-   git clone <this-repo>.git miniclosedai-voice && cd miniclosedai-voice
-   ./setup.sh && ./start.sh -d
-   ```
-4. Expose port 8090 in the pod's settings.
-5. Paste the public URL into MiniClosedAI's **Settings → + Add endpoint** (kind=Voice).
+Clone, run, done — the scripts self-configure for RunPod:
+
+```bash
+git clone <this-repo>.git miniclosedai-voice && cd miniclosedai-voice
+./setup.sh                 # picks the torch wheel matching the pod's driver
+./start.sh -d              # auto-detects RunPod, serves HTTP, prints the proxy URL
+```
+
+Then:
+
+1. Pick any RunPod (or other cloud) template with an NVIDIA driver pre-installed.
+2. In the pod's settings, **expose HTTP port 8090** (RunPod gives you a
+   `https://<POD_ID>-8090.proxy.runpod.net/` URL).
+3. Open that URL — it serves the Voice Studio page. `./start.sh -d` also prints
+   it for you on boot.
+4. Paste the same URL into MiniClosedAI's **Settings → + Add endpoint** (kind=Voice).
+
+### Why it "just works" on a new pod
+
+Two things that used to need manual fixing are now automatic:
+
+* **HTTPS vs. the RunPod proxy.** RunPod's `*.proxy.runpod.net` proxy terminates
+  TLS at its edge and connects to your container port over **plain HTTP**. A
+  service speaking HTTPS would make that request hit a TLS listener, so the
+  public URL just hangs / errors. `start.sh` detects RunPod via the
+  `RUNPOD_POD_ID` env var (set on every pod) and **serves plain HTTP
+  automatically** — no flag needed. The public URL is still `https://` because
+  the proxy adds TLS, so the browser mic recorder keeps working. Override with
+  `./start.sh --https` (rarely wanted) or `./start.sh --http` to force it.
+
+* **CUDA wheel vs. the pod's driver.** `setup.sh` reads `nvidia-smi` and installs
+  the torch wheel channel that matches the pod's driver (`cu118` / `cu124` /
+  `cu128` / `cu130` / `cpu`). If you ever land on a pod whose driver is older
+  than the wheel picked (`torch.cuda.is_available()` is `False` and the log says
+  *"NVIDIA driver on your system is too old"*), force the matching channel — read
+  the `CUDA Version:` in `nvidia-smi` and pass it, e.g. `./setup.sh --cuda 12.8`,
+  then `./start.sh -d` again.
+
+On a fresh pod the whole path is: `./setup.sh && ./start.sh -d`, open the printed
+`proxy.runpod.net` URL.
 
 ---
 
@@ -81,16 +113,24 @@ Re-running is safe. The script:
 ### `start.sh` — boot the service
 
 ```
-./start.sh                  # foreground
+./start.sh                  # foreground (HTTPS locally, HTTP on RunPod — auto)
 ./start.sh -d               # background, log → /tmp/voice.log
 ./start.sh --port 9090      # custom port
+./start.sh --http           # force plain HTTP
+./start.sh --https          # force HTTPS (overrides the RunPod auto-detect)
 ```
+
+Scheme is chosen automatically: **HTTPS** with a self-signed dev cert on a normal
+box (so the browser mic recorder works over the LAN), switched to **HTTP** when
+running on RunPod (its edge proxy needs a plain-HTTP backend — see the RunPod
+section above). `--http` / `--https` override the auto-detect.
 
 Environment variables it reads (all optional):
 
 | Var | Default | Description |
 |---|---|---|
 | `VOICE_PORT` | `8090` | TCP port |
+| `RUNPOD_POD_ID` | _(set by RunPod)_ | Presence triggers HTTP mode + prints the `<id>-<port>.proxy.runpod.net` URL |
 | `VOICE_DEVICE` | `auto` | `auto` / `cuda` / `cpu` |
 | `VOICE_ASR_MODEL` | `medium.en` | `tiny.en` / `small.en` / `medium.en` / `large-v3` |
 | `VOICE_VOICES_DIR` | `./voices` | Where reference voice WAVs live |
@@ -426,6 +466,8 @@ your mic is already loud — leave gain at 1.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| RunPod `proxy.runpod.net` URL hangs / won't load, but `/health` works on the pod | service is speaking HTTPS; the RunPod proxy needs a plain-HTTP backend | Now auto-handled — `start.sh` detects `RUNPOD_POD_ID` and serves HTTP. If you forced `--https`, drop it (or run `./start.sh --http`). Also confirm port 8090 is **exposed as HTTP** in the pod settings. |
+| `torch.cuda.is_available()` is `False`; log says *"NVIDIA driver on your system is too old"* | `setup.sh` picked a CUDA wheel newer than the pod's driver | Read `CUDA Version:` in `nvidia-smi`, re-run `./setup.sh --cuda <that version>` (e.g. `--cuda 12.8`), then `./start.sh -d`. |
 | `chatterbox.tts ImportError: PerthImplicitWatermarker is None` | `pkg_resources` missing (setuptools 81+) | `pip install 'setuptools<81'` (already in requirements.txt) |
 | `df.enhance ImportError: cannot import 'AudioMetaData' from 'torchaudio'` | DeepFilterNet 0.5.6 expects torchaudio<2.10 API | `setup.sh` patches `df/io.py` automatically. Run it again. |
 | Whisper warns `compute capability 12.1 not supported` | torch 2.10 doesn't have native sm_121 (Blackwell) kernels | PTX-JIT fallback works fine; ignore the warning |

@@ -13,7 +13,16 @@
 #   ./start.sh              # foreground HTTPS, logs to terminal
 #   ./start.sh -d           # background (daemon), logs to /tmp/voice.log
 #   ./start.sh --port 8090  # custom port (default 8090)
-#   ./start.sh --http       # plain HTTP (no TLS — recorder won't work from LAN)
+#   ./start.sh --http       # force plain HTTP (no TLS)
+#   ./start.sh --https      # force HTTPS even on RunPod (rarely wanted)
+#
+# RunPod (and similar edge-proxy hosts) terminate TLS at their own proxy and
+# forward to your container port over PLAIN HTTP. A service speaking HTTPS makes
+# the proxy's HTTP request hit a TLS listener, so the public *.proxy.runpod.net
+# URL fails to load. This script auto-detects RunPod (via $RUNPOD_POD_ID) and
+# switches to HTTP so the clone-and-run path just works — no flag needed. The
+# public URL is still https:// (the proxy adds TLS), so the browser mic recorder
+# keeps working. Override the auto-detect with --http / --https.
 #
 # Requires:
 #   ./setup.sh has been run once and ./env/ exists.
@@ -25,6 +34,7 @@ cd "$(dirname "$0")"
 PORT="${VOICE_PORT:-8090}"
 DAEMON=0
 HTTPS=1
+HTTPS_SET=0          # did the user explicitly pass --http/--https?
 LOG="${VOICE_LOG:-/tmp/voice.log}"
 PIDFILE="${VOICE_PIDFILE:-/tmp/voice.pid}"
 CERT_DIR=".devcerts"
@@ -36,7 +46,8 @@ while [[ $# -gt 0 ]]; do
     -d|--daemon) DAEMON=1; shift ;;
     --port)      PORT="$2"; shift 2 ;;
     --log)       LOG="$2"; shift 2 ;;
-    --http)      HTTPS=0; shift ;;
+    --http)      HTTPS=0; HTTPS_SET=1; shift ;;
+    --https)     HTTPS=1; HTTPS_SET=1; shift ;;
     -h|--help)
       sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
@@ -45,6 +56,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ ! -d env ]] && { echo "venv not found at ./env — run ./setup.sh first" >&2; exit 1; }
+
+# Auto-detect an edge-proxy host (RunPod) and default to HTTP. Their proxy
+# terminates TLS and speaks plain HTTP to the container port, so an HTTPS
+# service would make the public *.proxy.runpod.net URL unreachable. Skip this
+# if the user explicitly chose a scheme with --http/--https.
+RUNPOD="${RUNPOD_POD_ID:-}"
+if [[ "$HTTPS_SET" == "0" && -n "$RUNPOD" ]]; then
+  HTTPS=0
+  echo "Detected RunPod (RUNPOD_POD_ID=$RUNPOD) — serving plain HTTP so the RunPod"
+  echo "proxy can reach the service. Public URL stays HTTPS. Override with --https."
+fi
 
 # Generate a self-signed dev cert if missing. Covers localhost + the host's
 # primary LAN IP so the Voice Studio GUI works over both http://localhost:8090/
@@ -111,7 +133,10 @@ if [[ "$DAEMON" == "1" ]]; then
   echo "  Local:    ${SCHEME}://localhost:${PORT}/"
   lan_ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1 || echo '')"
   [[ -n "$lan_ip" ]] && echo "  LAN:      ${SCHEME}://${lan_ip}:${PORT}/"
+  [[ -n "$RUNPOD" ]] && echo "  RunPod:   https://${RUNPOD}-${PORT}.proxy.runpod.net/   (expose port ${PORT} in the pod)"
   echo "Stop with: ./stop.sh"
 else
+  echo "Serving ${SCHEME}://0.0.0.0:${PORT}/"
+  [[ -n "$RUNPOD" ]] && echo "  RunPod:   https://${RUNPOD}-${PORT}.proxy.runpod.net/   (expose port ${PORT} in the pod)"
   exec "${CMD[@]}"
 fi

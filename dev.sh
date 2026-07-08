@@ -71,7 +71,9 @@ cmd_up() {
     ./stop.sh >/dev/null 2>&1 || true
     sleep 1
   fi
-  step "Starting voice service on https://0.0.0.0:${PORT}"
+  # start.sh picks the scheme: HTTPS locally, auto-switched to HTTP on RunPod
+  # (its edge proxy speaks plain HTTP to the container). Don't hardcode a scheme.
+  step "Starting voice service on port ${PORT}"
   ./start.sh -d
   # Health-wait loop (cold model load can take 15-25 s on first launch).
   for _ in $(seq 1 40); do
@@ -106,6 +108,7 @@ cmd_status() {
       ok "pid $(voice_pid)  ${scheme}://localhost:${PORT}/  ✓"
       local ip; ip="$(lan_ip)"
       [[ -n "$ip" ]] && ok "LAN access:        ${scheme}://${ip}:${PORT}/"
+      [[ -n "${RUNPOD_POD_ID:-}" ]] && ok "RunPod proxy:      https://${RUNPOD_POD_ID}-${PORT}.proxy.runpod.net/"
     else
       warn "pid $(voice_pid)  but /health not responding"
     fi
