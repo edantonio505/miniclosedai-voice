@@ -267,7 +267,8 @@ async def upload_voice(
     """Clone a new voice from an uploaded WAV.
 
     Body: multipart/form-data
-      audio:    WAV file (browser-recorded; 0.5–35 s, mono or stereo, any SR)
+      audio:    WAV file (browser-recorded; ≥0.5 s, longer auto-trimmed to 90 s,
+                mono or stereo, any SR)
       name:     human display name (shown in the MiniClosedAI dropdown)
       language: ISO-639-1 code (`en` / `es` — defaults to en)
 

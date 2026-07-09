@@ -325,10 +325,10 @@ http://<voice-host>:8090/
 
 You get a small **Voice Studio** page that lets you:
 
-1. **Record** up to 30 seconds of yourself (or anyone) speaking — *or* click
-   **Upload audio file** to pick an existing clip (WAV, MP3, M4A, OGG, FLAC).
-   Either way, aim for 5–15 s of clean, natural speech — that's what
-   Chatterbox's docs recommend.
+1. **Record** yourself (or anyone) speaking — *or* click **Upload audio file**
+   to pick an existing clip (WAV, MP3, M4A, OGG, FLAC). Longer clips are
+   auto-trimmed to the first **90 s** (no hard reject), but aim for 5–15 s of
+   clean, natural speech — that's what Chatterbox's docs recommend.
 2. **Name** the voice (e.g. *"Edgar's voice"*) and pick a language
    (English / Spanish).
 3. **Save** — the server normalises the audio to 24000 Hz mono 16-bit PCM
@@ -366,7 +366,7 @@ directly from `curl` or your own UI:
 | Method | Path                     | Body / params                                            | Returns |
 |--------|--------------------------|----------------------------------------------------------|---------|
 | GET    | `/voices`                | (none)                                                   | live catalog `{lang: [{id, name, gender?}, ...]}` |
-| POST   | `/voices`                | multipart: `audio` (WAV, 0.5–35 s), `name`, `language`   | `201 {voice_id, name, language, duration_sec, sample_rate}` |
+| POST   | `/voices`                | multipart: `audio` (WAV, ≥0.5 s; longer auto-trimmed to 90 s), `name`, `language` | `201 {voice_id, name, language, duration_sec, sample_rate}` |
 | DELETE | `/voices/{voice_id}`     | (none)                                                   | `{ok, voice_id}` (or `400` for `default`, `404` for unknown) |
 
 ### Advanced — manual WAV drop
@@ -390,7 +390,7 @@ so Chatterbox re-runs its `prepare_conditionals` on the new reference.
 
 ```bash
 ./start.sh -d                # service must be running
-./test.sh                    # ~10 s, 15 assertions, color-coded pass/fail
+./test.sh                    # ~15 s, ~20 assertions, color-coded pass/fail
 ```
 
 Covers, in order:
@@ -398,11 +398,16 @@ Covers, in order:
 1. **Imports + GPU** — torch CUDA, transformers, chatterbox, df, fastrtc, aiortc
 2. **`/health`** — service reachable, model labels correct
 3. **`/voices`** — catalog non-empty + well-formed
-4. **`/speak`** — returns a valid WAV with non-trivial audio
-5. **`/speak/stream`** — first chunk latency, chunks arrive over SSE
-6. **ASR round-trip** — TTS output sent back through `/transcribe`,
+4. **`/api/connect-info`** — connect metadata (`kind`, `base_url`, `auth_required`)
+   that powers the Connect card + the integration-prompt modal
+5. **Voice Studio clone endpoints** — `GET /` serves the page, `DELETE /voices/default`
+   is refused, a `POST` + `DELETE /voices` round-trip succeeds (stored at 24000 Hz),
+   and an over-length upload is **auto-trimmed to 90 s** rather than rejected
+6. **`/speak`** — returns a valid WAV with non-trivial audio
+7. **`/speak/stream`** — first chunk latency, chunks arrive over SSE
+8. **ASR round-trip** — TTS output sent back through `/transcribe`,
    fuzzy-matched against the input phrase
-7. **Call mode handshake** — `/call/configure` + `/webrtc/offer` accepts an
+9. **Call mode handshake** — `/call/configure` + `/webrtc/offer` accepts an
    aiortc-generated SDP and returns a valid answer
 
 Flags:

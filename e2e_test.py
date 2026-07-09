@@ -214,6 +214,23 @@ def stage_voices(s: Suite, url: str) -> None:
     s.run("/voices returns a non-empty catalog", get_voices)
 
 
+def stage_connect_info(s: Suite, url: str) -> None:
+    """/api/connect-info — powers the Connect card + the integration-prompt modal."""
+    _h("/api/connect-info (MiniClosedAI connect metadata)")
+
+    def get_connect_info():
+        with _client(url) as c:
+            r = c.get("/api/connect-info")
+            assert r.status_code == 200, f"got {r.status_code}"
+            j = r.json()
+            assert j.get("kind") == "voice", f"kind should be 'voice': {j}"
+            assert isinstance(j.get("base_url"), str) and j["base_url"], f"no base_url: {j}"
+            assert isinstance(j.get("auth_required"), bool), f"auth_required not bool: {j}"
+            _info(f"base_url={j['base_url']}  alt={j.get('alt_base_url')}  auth_required={j['auth_required']}")
+
+    s.run("/api/connect-info returns valid connect metadata", get_connect_info)
+
+
 def stage_studio(s: Suite, url: str) -> None:
     """Voice Studio GUI + clone endpoints — exercises POST/DELETE /voices."""
     _h("Voice Studio (clone endpoints + static GUI)")
@@ -266,7 +283,9 @@ def stage_studio(s: Suite, url: str) -> None:
             voice_id = payload["voice_id"]
             assert payload["name"] == clone_name
             assert payload["language"] == "en"
-            assert payload["sample_rate"] == 22050
+            # Clone references are normalised to Chatterbox's 24000 Hz reference
+            # rate on disk (NOT the 22050 Hz TTS *output* rate — see server.py).
+            assert payload["sample_rate"] == 24000, payload
             assert 0.9 < payload["duration_sec"] < 1.2, payload
 
             # Catalog should now include the new voice under 'en'.
@@ -281,6 +300,42 @@ def stage_studio(s: Suite, url: str) -> None:
             ids = [v["id"] for entries in cat.values() for v in entries]
             assert voice_id not in ids, f"voice still in catalog after delete: {ids}"
     s.run("POST + DELETE /voices round-trip succeeds", upload_and_delete)
+
+    # Over-length uploads are auto-trimmed to 90 s, NOT rejected (see
+    # _VOICE_MAX_DURATION_SEC in server.py — the reject→trim behavior change).
+    def upload_overlength_is_trimmed():
+        import math
+        import struct
+        import wave
+        import io as _io
+        sr = 22050
+        secs = 100          # 10 s past the 90 s cap
+        n = sr * secs
+        amp = 0.2
+        buf = _io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            samples = bytearray()
+            for i in range(n):
+                samples += struct.pack("<h", int(32767 * amp * math.sin(2 * math.pi * 220 * i / sr)))
+            w.writeframes(bytes(samples))
+        wav_bytes = buf.getvalue()
+
+        with _client(url) as c:
+            r = c.post(
+                "/voices",
+                files={"audio": ("long.wav", wav_bytes, "audio/wav")},
+                data={"name": "E2E Trim Test", "language": "en"},
+            )
+            assert r.status_code == 201, f"over-length upload rejected: {r.status_code} {r.text[:200]}"
+            payload = r.json()
+            _info(f"uploaded {secs}s → stored {payload['duration_sec']:.1f}s")
+            assert payload["duration_sec"] <= 90.5, f"not trimmed to ~90s: {payload}"
+            assert payload["duration_sec"] >= 89.0, f"trimmed too aggressively: {payload}"
+            c.delete(f"/voices/{payload['voice_id']}")  # cleanup
+    s.run("over-length upload is auto-trimmed to 90 s (not rejected)", upload_overlength_is_trimmed)
 
 
 def stage_tts(s: Suite, url: str) -> bytes:
@@ -453,6 +508,7 @@ def main() -> int:
         return s.summary()
 
     stage_voices(s, args.url)
+    stage_connect_info(s, args.url)
     stage_studio(s, args.url)
     wav = stage_tts(s, args.url)
     stage_tts_stream(s, args.url)
