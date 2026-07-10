@@ -41,31 +41,43 @@ from av import AudioFrame
 # the in-process TTS directly to avoid an extra HTTP hop.
 # ---------------------------------------------------------------------------
 async def synth_test_phrase(text: str, voice: str = "default", language: str = "en",
-                            speak_url: str = "http://localhost:8090/speak") -> str:
+                            speak_url: str | None = None) -> str:
     """Generate `text` as a WAV via the local server's /speak endpoint.
 
     Reuses the server's GPU-loaded TTS instead of spinning up a second copy
     (Chatterbox on CPU takes minutes per sentence — unusable for tests).
-    Falls back to a synthesized sine-burst at 16 kHz if /speak is unavailable,
-    which still exercises the full WebRTC + VAD path even if TTS is offline.
+    Tries HTTPS first (the bare-metal server runs TLS with a self-signed
+    cert), then plain HTTP (legacy Docker). Falls back to a synthesized
+    sine-burst at 16 kHz ONLY if both are unavailable — and says so loudly,
+    because a beep never passes VAD/ASR and the run will read as a failure.
     """
     path = "/tmp/test_phrase.wav"
     audio = None
     sample_rate = 22050
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as c:
-            resp = await c.post(speak_url, json={
-                "text": text, "voice": voice, "language": language,
-            })
-            resp.raise_for_status()
-            data = resp.content
-            with wave.open(io.BytesIO(data)) as r:
-                sample_rate = r.getframerate()
-                audio = np.frombuffer(r.readframes(r.getnframes()), dtype=np.int16)
-    except Exception:
+    candidates = [speak_url] if speak_url else [
+        "https://localhost:8090/speak", "http://localhost:8090/speak",
+    ]
+    for url in candidates:
+        try:
+            async with httpx.AsyncClient(timeout=120.0, verify=False) as c:
+                resp = await c.post(url, json={
+                    "text": text, "voice": voice, "language": language,
+                })
+                resp.raise_for_status()
+                data = resp.content
+                with wave.open(io.BytesIO(data)) as r:
+                    sample_rate = r.getframerate()
+                    audio = np.frombuffer(r.readframes(r.getnframes()), dtype=np.int16)
+                break
+        except Exception:
+            continue
+    if audio is None:
         # Fallback — synthesize a 1-second 440Hz beep so the rest of the test
-        # can still exercise WebRTC handshake + VAD. Won't transcribe but
-        # surfaces stage timings for everything except ASR.
+        # can still exercise WebRTC handshake + VAD. Won't transcribe (silero
+        # rejects tones), so ASR/reply/TTS checks WILL fail — the timings are
+        # the only useful output of a beep run.
+        print("WARNING: /speak unreachable over https AND http — sending a "
+              "beep; transcript/reply checks will fail.", file=sys.stderr)
         t = np.linspace(0, 1.0, sample_rate, endpoint=False, dtype=np.float32)
         audio = (np.sin(2 * np.pi * 440 * t) * 16000).astype(np.int16)
 

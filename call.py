@@ -32,10 +32,37 @@ import asyncio
 import json
 import logging
 import re
+import uuid
 
 import httpx
 import numpy as np
 from fastrtc import AdditionalOutputs, ReplyOnPause
+
+
+# -- Relay mode ---------------------------------------------------------------
+#
+# Normally each turn POSTs to MiniClosedAI's /chat/stream — which requires this
+# voice server to be able to reach MiniClosedAI. When the voice server runs
+# remotely (RunPod, cloud) and MiniClosedAI sits on a private LAN, that reverse
+# connection is impossible. Relay mode inverts the leg: the turn emits a
+# `{turn_request: {turn_id, text}}` event on the /call/events channel (which
+# MiniClosedAI is already reading — it proxies the SSE to the browser),
+# MiniClosedAI runs the LLM itself, and streams the reply text back to us via
+# POST /call/turn/{turn_id}. Every connection is outbound FROM MiniClosedAI,
+# so any reachable voice server works — no tunnel, no public URL.
+#
+# `_RELAY_TURNS` maps a pending turn's id → the asyncio.Queue its reader is
+# blocked on. server.py's /call/turn/{turn_id} endpoint feeds it.
+
+_RELAY_TURNS: dict[str, asyncio.Queue] = {}
+
+# How long the relay reader waits for the FIRST/next event before giving up —
+# covers MiniClosedAI dying mid-turn or never having tapped the events stream.
+_RELAY_TIMEOUT_S = 120.0
+
+
+def get_relay_queue(turn_id: str) -> asyncio.Queue | None:
+    return _RELAY_TURNS.get(turn_id)
 
 
 # -- Sentence splitter -----------------------------------------------------
@@ -193,16 +220,18 @@ class BotCallHandler:
         asr,
         tts,
         conv_id: int,
-        miniclosedai_url: str,
+        miniclosedai_url: str | None,
         voice_id: str,
         language: str,
+        relay: bool = False,
     ) -> None:
         self.asr = asr
         self.tts = tts
         self.conv_id = conv_id
-        self.miniclosedai_url = miniclosedai_url.rstrip("/")
+        self.miniclosedai_url = (miniclosedai_url or "").rstrip("/")
         self.voice_id = voice_id
         self.language = language
+        self.relay = relay
 
     async def _synthesize(self, text: str):
         """Yield (pcm_chunk_bytes, sample_rate) per TTS chunk as they form.
@@ -340,8 +369,100 @@ class BotCallHandler:
         out_q: asyncio.Queue = asyncio.Queue()
         sentence_q: asyncio.Queue = asyncio.Queue()
         SENTINEL = object()
+        # Relay-mode plumbing: a per-turn id + queue registered BEFORE the
+        # turn_request event goes out, so the push endpoint can never race a
+        # not-yet-registered turn.
+        turn_id = uuid.uuid4().hex
+        relay_q: asyncio.Queue = asyncio.Queue()
+        if self.relay:
+            _RELAY_TURNS[turn_id] = relay_q
         # Counter so the tts_worker can attach a stable index per sentence to
         # its first-chunk timing log. Producer increments; consumer reads.
+
+        async def _ingest_piece(piece: str):
+            """Handle one LLM text piece: forward to the UI immediately and
+            pump completed sentences to the TTS worker. Shared by both the
+            direct SSE reader and the relay reader — identical semantics."""
+            nonlocal buffer, full_reply, n_sentences
+            nonlocal t_llm_first_tok, t_first_sentence
+            full_reply.append(piece)
+            buffer += piece
+            if t_llm_first_tok is None:
+                t_llm_first_tok = time.perf_counter()
+                timings["llm_ttft_ms"] = (t_llm_first_tok - t_llm_post) * 1000
+                log.info(
+                    "conv=%s [llm] first token in %.0f ms",
+                    self.conv_id, timings["llm_ttft_ms"],
+                )
+            # Forward the text IMMEDIATELY — every token reaches the UI
+            # bubble at the LLM's actual emission cadence, untouched by TTS.
+            await out_q.put(("text", piece))
+            # Pump complete sentences onto sentence_q; the tts_worker pops
+            # them in parallel. The first sentence uses a smaller min length
+            # so audio starts the instant it completes.
+            while True:
+                cur_min = _FIRST_MIN_LEN if n_sentences == 0 else _MIN_LEN
+                sentence, buffer = _next_sentence(buffer, min_len=cur_min)
+                if not sentence:
+                    break
+                n_sentences += 1
+                if t_first_sentence is None:
+                    t_first_sentence = time.perf_counter()
+                    timings["first_sentence_ms"] = (t_first_sentence - t_llm_post) * 1000
+                    log.info(
+                        "conv=%s [sentence #%d] %.0f ms after LLM POST → %r",
+                        self.conv_id, n_sentences,
+                        timings["first_sentence_ms"], sentence[:80],
+                    )
+                await sentence_q.put((n_sentences, sentence))
+
+        def _flush_tail_sync():
+            """Queue whatever's still in the buffer (final fragment, often has
+            no terminator). Returns the coroutine to await."""
+            nonlocal n_sentences
+            tail = buffer.strip()
+            if tail:
+                n_sentences += 1
+                return sentence_q.put((n_sentences, tail))
+            return None
+
+        async def _llm_relay_reader():
+            """Relay mode: MiniClosedAI runs the LLM and pushes the reply text
+            to POST /call/turn/{turn_id}, which feeds `relay_q`. This reader
+            just pops events — no outbound connection from the voice server at
+            all (that's the point: works from RunPod/cloud into a LAN
+            MiniClosedAI where the reverse dial is impossible)."""
+            try:
+                while True:
+                    try:
+                        ev = await asyncio.wait_for(relay_q.get(), timeout=_RELAY_TIMEOUT_S)
+                    except asyncio.TimeoutError:
+                        await out_q.put((
+                            "err",
+                            "relay: no LLM data from MiniClosedAI within "
+                            f"{int(_RELAY_TIMEOUT_S)}s — is its /call/events "
+                            "stream still connected?",
+                        ))
+                        return
+                    if not isinstance(ev, dict):
+                        continue
+                    if "error" in ev:
+                        await out_q.put(("err", str(ev["error"])))
+                        return
+                    if "chunk" in ev and ev["chunk"]:
+                        await _ingest_piece(str(ev["chunk"]))
+                    if ev.get("end"):
+                        break
+                flush = _flush_tail_sync()
+                if flush is not None:
+                    await flush
+            except Exception as e:
+                log.exception("relay turn failed")
+                await out_q.put(("err", f"chat: {e}"))
+            finally:
+                _RELAY_TURNS.pop(turn_id, None)
+                # Signal end-of-sentences to the tts worker.
+                await sentence_q.put((None, None))
 
         async def _llm_reader():
             """Read the LLM /chat/stream SSE socket continuously.
@@ -392,39 +513,7 @@ class BotCallHandler:
                                     await out_q.put(("err", ev["error"]))
                                     return
                                 if "chunk" in ev:
-                                    piece = ev["chunk"]
-                                    full_reply.append(piece)
-                                    buffer += piece
-                                    if t_llm_first_tok is None:
-                                        t_llm_first_tok = time.perf_counter()
-                                        timings["llm_ttft_ms"] = (t_llm_first_tok - t_llm_post) * 1000
-                                        log.info(
-                                            "conv=%s [llm] first token in %.0f ms",
-                                            self.conv_id, timings["llm_ttft_ms"],
-                                        )
-                                    # Forward the text IMMEDIATELY — every
-                                    # token reaches the UI bubble at the LLM's
-                                    # actual emission cadence, untouched by TTS.
-                                    await out_q.put(("text", piece))
-                                    # Pump complete sentences onto sentence_q;
-                                    # the tts_worker pops them in parallel. The
-                                    # first sentence uses a smaller min length so
-                                    # audio starts the instant it completes.
-                                    while True:
-                                        cur_min = _FIRST_MIN_LEN if n_sentences == 0 else _MIN_LEN
-                                        sentence, buffer = _next_sentence(buffer, min_len=cur_min)
-                                        if not sentence:
-                                            break
-                                        n_sentences += 1
-                                        if t_first_sentence is None:
-                                            t_first_sentence = time.perf_counter()
-                                            timings["first_sentence_ms"] = (t_first_sentence - t_llm_post) * 1000
-                                            log.info(
-                                                "conv=%s [sentence #%d] %.0f ms after LLM POST → %r",
-                                                self.conv_id, n_sentences,
-                                                timings["first_sentence_ms"], sentence[:80],
-                                            )
-                                        await sentence_q.put((n_sentences, sentence))
+                                    await _ingest_piece(ev["chunk"])
                                 if ev.get("end"):
                                     chat_done = True
                                     break
@@ -432,10 +521,9 @@ class BotCallHandler:
                                 break
                 # Flush whatever's still in the buffer (final fragment, often
                 # has no terminator).
-                tail = buffer.strip()
-                if tail:
-                    n_sentences += 1
-                    await sentence_q.put((n_sentences, tail))
+                flush = _flush_tail_sync()
+                if flush is not None:
+                    await flush
             except Exception as e:
                 log.exception("chat stream failed")
                 await out_q.put(("err", f"chat: {e}"))
@@ -483,7 +571,14 @@ class BotCallHandler:
                 # consumer that no more events are coming.
                 await out_q.put((SENTINEL, None))
 
-        llm_task = asyncio.create_task(_llm_reader())
+        if self.relay:
+            # Announce the turn on the events channel — MiniClosedAI's events
+            # proxy intercepts {turn_request}, runs the LLM, and streams the
+            # reply back to POST /call/turn/{turn_id} (feeding relay_q above).
+            yield AdditionalOutputs({"turn_request": {"turn_id": turn_id, "text": text}})
+            llm_task = asyncio.create_task(_llm_relay_reader())
+        else:
+            llm_task = asyncio.create_task(_llm_reader())
         tts_task = asyncio.create_task(_tts_worker())
         spoke_announced = False
         try:
@@ -508,6 +603,9 @@ class BotCallHandler:
             for t in (llm_task, tts_task):
                 if not t.done():
                     t.cancel()
+            # Belt-and-braces: drop the relay registration even if the reader
+            # never ran (barge-in between registration and task start).
+            _RELAY_TURNS.pop(turn_id, None)
 
         # 4. Done — tell the UI to finalize the bubble and reset to listening.
         timings["total_ms"] = (time.perf_counter() - t_turn_start) * 1000
@@ -530,7 +628,10 @@ class BotCallHandler:
         #    for the latency win) so persistence costs zero TTFT but the
         #    conversation still records every turn — same shape as a normal
         #    /chat/stream turn would produce.
-        if text and reply_text:
+        # In relay mode MiniClosedAI ran the LLM itself and persists the turn
+        # on its side — POSTing back would double-write (and needs the very
+        # reverse connection relay mode exists to avoid).
+        if text and reply_text and not self.relay:
             async def _persist():
                 try:
                     persist_url = (
@@ -558,12 +659,14 @@ class BotCallHandler:
         yield AdditionalOutputs({"end": True})
 
 
-def build_handler(asr, tts, conv_id, miniclosedai_url, voice_id, language) -> ReplyOnPause:
+def build_handler(asr, tts, conv_id, miniclosedai_url, voice_id, language,
+                  relay: bool = False) -> ReplyOnPause:
     """Construct a ReplyOnPause-wrapped instance for one call.
 
     FastRTC's ReplyOnPause does the VAD + buffering: it accumulates input
     audio frames, detects pauses via Silero VAD, and calls our `respond`
     generator with the buffered chunk. Barge-in support is built-in.
     """
-    inst = BotCallHandler(asr, tts, conv_id, miniclosedai_url, voice_id, language)
+    inst = BotCallHandler(asr, tts, conv_id, miniclosedai_url, voice_id, language,
+                          relay=relay)
     return ReplyOnPause(inst.respond)

@@ -47,7 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from asr import ASR
 from tts import TTS, VOICE_CATALOG, scan_voice_catalog
-from call import BotCallHandler
+from call import BotCallHandler, get_relay_queue
 
 # ---------------------------------------------------------------------------
 # Config (env vars)
@@ -136,6 +136,11 @@ def health():
         "tts_model": "chatterbox-turbo",
         "device": DEVICE,
         "voices_loaded": _tts is not None,
+        # Advertises relay-mode call support (MiniClosedAI pushes LLM text to
+        # /call/turn/{id} instead of us dialing its /chat/stream). MiniClosedAI
+        # gates its configure payload on this so old voice servers keep the
+        # legacy direct-callback flow.
+        "relay_capable": True,
     }
 
 
@@ -446,6 +451,7 @@ async def speak(req: SpeakRequest, _=Depends(_require_auth)):
 _call_config: dict = {
     "conv_id": None,
     "miniclosedai_url": "",
+    "relay": False,
     "voice_id": "",
     "language": "en",
 }
@@ -461,7 +467,12 @@ def _default_voice(lang: str) -> str:
 class CallConfigure(BaseModel):
     model_config = ConfigDict(extra="forbid")
     conv_id: int
-    miniclosedai_url: str = Field(..., min_length=1)
+    # Direct mode: the URL this voice server dials for /chat/stream. Relay
+    # mode (relay=true): MiniClosedAI runs the LLM itself and pushes the reply
+    # to POST /call/turn/{turn_id} — no URL needed, and the voice server never
+    # dials MiniClosedAI (works when we're remote and it's on a private LAN).
+    miniclosedai_url: str | None = Field(None, min_length=1)
+    relay: bool = False
     voice: str | None = None
     language: str | None = None
 
@@ -496,16 +507,59 @@ async def call_configure(req: CallConfigure, _=Depends(_require_auth)):
     resolved config so the browser knows which voice/language defaulted in.
     Kicks off a background warm of the chosen voice so the first turn is hot.
     """
+    if not req.relay and not req.miniclosedai_url:
+        raise HTTPException(422, "miniclosedai_url is required unless relay=true")
     lang = (req.language or "en").lower()
     voice = req.voice or _default_voice(lang)
     _call_config["conv_id"] = req.conv_id
-    _call_config["miniclosedai_url"] = req.miniclosedai_url
+    _call_config["miniclosedai_url"] = req.miniclosedai_url or ""
+    _call_config["relay"] = bool(req.relay)
     _call_config["voice_id"] = voice
     _call_config["language"] = lang
     # Fire-and-forget: don't block the config response (the browser POSTs the
     # SDP offer right after) — the warm runs while the WebRTC handshake happens.
     asyncio.create_task(_prewarm_voice(voice))
     return {"ok": True, "conv_id": req.conv_id, "voice": voice, "language": lang}
+
+
+@app.post("/call/turn/{turn_id}")
+async def call_turn_push(turn_id: str, request: Request, _=Depends(_require_auth)):
+    """Relay-mode ingress: MiniClosedAI streams the LLM reply here.
+
+    Body is newline-delimited JSON, one event per line, pushed incrementally
+    over a single connection:
+        {"chunk": "<assistant text piece>"}   × N
+        {"end": true}                          — turn complete
+        {"error": "..."}                       — LLM failed
+    Feeds the asyncio.Queue the turn's relay reader (call.py) is blocked on.
+    404 when the turn id is unknown/expired (call hung up, reader timed out).
+    """
+    q = get_relay_queue(turn_id)
+    if q is None:
+        raise HTTPException(404, f"unknown or expired turn {turn_id!r}")
+    buf = ""
+    async for raw in request.stream():
+        buf += raw.decode(errors="replace")
+        while "\n" in buf:
+            line, buf = buf.split("\n", 1)
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(ev, dict):
+                await q.put(ev)
+    tail = buf.strip()
+    if tail:
+        try:
+            ev = json.loads(tail)
+            if isinstance(ev, dict):
+                await q.put(ev)
+        except ValueError:
+            pass
+    return {"ok": True}
 
 
 @app.get("/call/events/{webrtc_id}")
@@ -545,7 +599,8 @@ async def _call_handler(audio):
     a fresh BotCallHandler for each turn so per-call state stays local; the
     asr/tts singletons are reused, no extra model load.
     """
-    if _call_config["conv_id"] is None or not _call_config["miniclosedai_url"]:
+    if _call_config["conv_id"] is None or not (
+            _call_config["relay"] or _call_config["miniclosedai_url"]):
         return
     asr = await _get_asr()
     tts = await _get_tts()
@@ -555,6 +610,7 @@ async def _call_handler(audio):
         _call_config["miniclosedai_url"],
         _call_config["voice_id"],
         _call_config["language"],
+        relay=_call_config["relay"],
     )
     async for ev in inst.respond(audio):
         yield ev
