@@ -460,6 +460,30 @@ VOICE_ASR_MODEL=medium.en ./start.sh -d
 VOICE_ASR_MODEL=large-v3 ./start.sh -d
 ```
 
+### Call latency — first audio out
+
+In a live call the bot should start speaking as soon as its **first sentence**
+is written, overlapping the rest of the reply. Three things govern that:
+
+- **`VOICE_CHUNK_TOKENS`** (default `32`) — speech tokens accumulated before the
+  vocoder emits the first audio chunk. Lower = the first frame leaves sooner
+  (snappier), at a small cost to intonation continuity within a chunk. `32`
+  puts first-chunk latency at ~500 ms on the GB10; raise toward `48`–`75` for
+  smoother prosody if you don't mind waiting a bit longer to hear audio.
+  ```bash
+  VOICE_CHUNK_TOKENS=48 ./start.sh -d      # smoother, ~150 ms more latency
+  ```
+- **Voice pre-warm** — `POST /call/configure` now runs `prepare_conditionals`
+  for the chosen voice in the background, so a cloned voice (e.g. `ed2`) doesn't
+  pay the cold voice-switch cost inside the first spoken sentence. Automatic; no
+  config needed.
+- **Eager first-sentence flush** — `call.py` hands sentence #1 to TTS the moment
+  its terminator appears (a shorter minimum length for the opener), instead of
+  waiting for the next sentence or end-of-stream. Automatic.
+
+Confirm the effect in `/tmp/voice.log`: `[tts #1] first chunk in <N> ms` should
+be a few hundred ms, and audio begins while later sentences are still streaming.
+
 ### Echo handling
 
 `can_interrupt=False` is hardcoded in `server.py` because the bot's TTS

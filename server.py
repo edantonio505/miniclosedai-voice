@@ -466,12 +466,35 @@ class CallConfigure(BaseModel):
     language: str | None = None
 
 
+async def _prewarm_voice(voice: str) -> None:
+    """Load the TTS model (if needed) and run prepare_conditionals for `voice`
+    so the FIRST spoken sentence of the call isn't cold.
+
+    Without this, only the `default` voice is warmed at startup (tts.py), and a
+    call using a cloned voice (e.g. `ed2`) pays the ~hundreds-of-ms-to-seconds
+    prepare_conditionals cost inside sentence #1 — the audio then lands after
+    the whole reply has already streamed to the screen. Best-effort: any error
+    just means the first turn warms lazily as before.
+    """
+    try:
+        tts = await _get_tts()
+        wav = tts._wav_for(voice) or tts._wav_for("default")
+        if wav is None:
+            return
+        if voice != getattr(tts, "_current_voice", ""):
+            await asyncio.to_thread(tts._switch_to, wav, voice)
+            logging.getLogger("voice.call").info("conv prewarm: voice %r ready", voice)
+    except Exception:
+        logging.getLogger("voice.call").warning("voice prewarm failed", exc_info=True)
+
+
 @app.post("/call/configure")
-def call_configure(req: CallConfigure, _=Depends(_require_auth)):
+async def call_configure(req: CallConfigure, _=Depends(_require_auth)):
     """Set the per-call config the WebRTC handler will read on each turn.
 
     Must be called immediately before POSTing the SDP offer. Returns the
     resolved config so the browser knows which voice/language defaulted in.
+    Kicks off a background warm of the chosen voice so the first turn is hot.
     """
     lang = (req.language or "en").lower()
     voice = req.voice or _default_voice(lang)
@@ -479,6 +502,9 @@ def call_configure(req: CallConfigure, _=Depends(_require_auth)):
     _call_config["miniclosedai_url"] = req.miniclosedai_url
     _call_config["voice_id"] = voice
     _call_config["language"] = lang
+    # Fire-and-forget: don't block the config response (the browser POSTs the
+    # SDP offer right after) — the warm runs while the WebRTC handshake happens.
+    asyncio.create_task(_prewarm_voice(voice))
     return {"ok": True, "conv_id": req.conv_id, "voice": voice, "language": lang}
 
 

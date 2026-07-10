@@ -55,8 +55,21 @@ _ABBREVIATIONS = frozenset({
 _SPLIT_PAT = re.compile(r"[.!?][\"')\]]?(\s+)(?=[A-Z\"'(0-9])")
 # Soft boundary: terminator followed by a newline (LLM finished a paragraph).
 _NEWLINE_PAT = re.compile(r"[.!?][\"')\]]?\n+")
+# Terminator at the VERY END of the buffer (nothing after it yet). During
+# streaming this means "sentence 1 is complete but the next token hasn't
+# arrived" — we flush it now instead of waiting for the next sentence's first
+# char (the _SPLIT_PAT lookahead) or for end-of-stream. This is the change that
+# lets audio start the moment the first sentence finishes being written.
+_END_TERM_PAT = re.compile(r"[.!?][\"')\]]?\s*$")
 # Trailing-word check to skip false positives like "Mr. Smith".
 _LAST_WORD_PAT = re.compile(r"\S+$")
+
+# Minimum sentence length before we flush to TTS. The FIRST sentence of a turn
+# uses a smaller floor so a short opener ("Yes.", "Sure!", "Got it.") starts
+# playing immediately; later sentences use the larger floor to avoid chopping
+# mid-thought. Both still honour the abbreviation / decimal guards.
+_FIRST_MIN_LEN = 4
+_MIN_LEN = 20
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +151,20 @@ def _next_sentence(buf: str, *, min_len: int = 20, force_max: int = 240) -> tupl
     nl = _NEWLINE_PAT.search(buf)
     if nl and len((c := buf[:nl.end()].rstrip())) >= min_len:
         return c, buf[nl.end():]
+
+    # Eager end-of-buffer flush: a terminator sits at the end of the buffer with
+    # nothing after it. Treat it as a complete sentence NOW rather than waiting
+    # for the next token. Guard against decimals / list numerals ("3.14", "3.")
+    # by refusing when the last word is purely digits, and keep the abbreviation
+    # guard ("Dr.", "e.g.").
+    if _END_TERM_PAT.search(buf):
+        candidate = buf.rstrip()
+        if len(candidate) >= min_len:
+            lw = _LAST_WORD_PAT.search(candidate)
+            word = lw.group().lower() if lw else ""
+            core = word.rstrip(".!?\"')]")
+            if word not in _ABBREVIATIONS and not core.isdigit():
+                return candidate, ""
 
     if len(buf) >= force_max:
         head = buf[:force_max]
@@ -380,9 +407,12 @@ class BotCallHandler:
                                     # actual emission cadence, untouched by TTS.
                                     await out_q.put(("text", piece))
                                     # Pump complete sentences onto sentence_q;
-                                    # the tts_worker pops them in parallel.
+                                    # the tts_worker pops them in parallel. The
+                                    # first sentence uses a smaller min length so
+                                    # audio starts the instant it completes.
                                     while True:
-                                        sentence, buffer = _next_sentence(buffer)
+                                        cur_min = _FIRST_MIN_LEN if n_sentences == 0 else _MIN_LEN
+                                        sentence, buffer = _next_sentence(buffer, min_len=cur_min)
                                         if not sentence:
                                             break
                                         n_sentences += 1

@@ -34,6 +34,7 @@ clean speech sample). Drop additional WAVs there to add voices.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Iterator
 
@@ -149,9 +150,14 @@ CHATTERBOX_SR = 22_050
 
 # How many speech tokens to accumulate before running the S3Gen vocoder and
 # emitting an audio chunk. Lower = snappier first-chunk + smaller packets;
-# higher = better intonation continuity inside one chunk. 75 matches the
-# tts_server.py reference.
-_CHUNK_TOKENS = 75
+# higher = better intonation continuity inside one chunk. The tts_server.py
+# reference used 75, but that puts the FIRST audible frame ~950 ms out on the
+# GB10 — long enough that a short reply finishes streaming its text before any
+# audio plays (the "all text, then audio" call-mode symptom). 32 roughly halves
+# the tokens-before-first-chunk so sentence 1's audio starts while later
+# sentences are still being written, at a small cost to intonation continuity
+# within a chunk. Tune with VOICE_CHUNK_TOKENS (e.g. 48–75 for smoother prosody).
+_CHUNK_TOKENS = int(os.environ.get("VOICE_CHUNK_TOKENS", "32"))
 
 # Diffusion steps for the S3Gen vocoder per chunk. 4 is the speed/quality
 # knee — ChatterboxTurbo's default is 1000, which is unusable for streaming.
@@ -180,7 +186,6 @@ _EXAGGERATION = 0.7   # how much emotion the voice reference imposes
 # Override at runtime:
 #   VOICE_PITCH_SHIFT_STEPS=0  + VOICE_SPEED_FACTOR=1.0  → disable adjustment
 #   VOICE_PITCH_SHIFT_STEPS=-3 + VOICE_SPEED_FACTOR=1.3  → more aggressive
-import os
 from fractions import Fraction
 _PITCH_SHIFT_STEPS = float(os.environ.get("VOICE_PITCH_SHIFT_STEPS", "-2"))
 _SPEED_FACTOR      = float(os.environ.get("VOICE_SPEED_FACTOR",      "1.2"))
